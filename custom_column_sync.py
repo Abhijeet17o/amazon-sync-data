@@ -8,6 +8,13 @@ Features:
 - Environment variable based credentials for security
 - Duplicate prevention and custom column formatting
 - Azure Functions ready deployment
+- Fetches orders from last 6 hours (handles sleep time gaps)
+- Total Amount column removed as requested
+
+Column Layout (Total Amount removed):
+1. Print Status, 2. SKU Status, 3. Order Status, 4. Product Name, 
+5. Quantity Ordered, 6. Order Summary, 7. Order ID, 8. Purchase Date,
+9. Buyer Name, 10. Ship City, 11. Ship State, 12. ASIN
 """
 
 import os
@@ -59,9 +66,9 @@ class CustomAmazonSync:
         try:
             self.worksheet = self.spreadsheet.worksheet('Orders')
         except gspread.WorksheetNotFound:
-            self.worksheet = self.spreadsheet.add_worksheet(title='Orders', rows=1000, cols=13)
+            self.worksheet = self.spreadsheet.add_worksheet(title='Orders', rows=1000, cols=12)
             
-            # Add headers in exact sequence requested
+            # Add headers in exact sequence requested (Total Amount removed)
             headers = [
                 'Print Status',      # Dropdown: Not Printed/Printed
                 'SKU Status',       # Dropdown: Not Packed/Box Packed
@@ -72,7 +79,6 @@ class CustomAmazonSync:
                 'Order ID',
                 'Purchase Date',    # Formatted date
                 'Buyer Name',
-                'Total Amount',
                 'Ship City',
                 'Ship State',
                 'ASIN'
@@ -188,8 +194,8 @@ class CustomAmazonSync:
             print(f"⚠️ Could not read existing data: {e}")
             return set()
     
-    def get_recent_orders(self, hours_back=24):
-        """Get orders from last X hours"""
+    def get_recent_orders(self, hours_back=6):
+        """Get orders from last X hours (default 6 hours to handle sleep gaps)"""
         try:
             amazon_credentials = get_amazon_credentials()
             orders_api = Orders(marketplace=Marketplaces.IN, credentials=amazon_credentials)
@@ -250,10 +256,6 @@ class CustomAmazonSync:
             # Get order items
             order_items = self.get_order_details(order_id)
             
-            # Get order total
-            order_total = order.get('OrderTotal', {})
-            total_amount = f"{order_total.get('Amount', 'N/A')} {order_total.get('CurrencyCode', 'INR')}"
-            
             # Get shipping address
             shipping_address = order.get('ShippingAddress', {})
             ship_city = shipping_address.get('City', 'N/A')
@@ -280,7 +282,7 @@ class CustomAmazonSync:
                     if order_status.lower() == 'shipped':
                         order_status = 'Ordered'
                     
-                    # Create row data in new column order
+                    # Create row data in new column order (Total Amount removed)
                     row_data = [
                         'Not Printed',  # Print Status (default)
                         'Not Packed',   # SKU Status (default)
@@ -291,7 +293,6 @@ class CustomAmazonSync:
                         order_id,       # Order ID
                         formatted_date,
                         buyer_name,
-                        total_amount,
                         ship_city,
                         ship_state,
                         item.get('ASIN', 'N/A')
@@ -327,7 +328,6 @@ class CustomAmazonSync:
                     order_id,       # Order ID
                     formatted_date,
                     buyer_name,
-                    total_amount,
                     ship_city,
                     ship_state,
                     'N/A'
@@ -364,8 +364,8 @@ def azure_timer_handler():
         sheet_url = os.environ.get('GOOGLE_SHEET_URL', "https://docs.google.com/spreadsheets/d/1REsoseklT3qWeUVI7ngGrpLBe-6WPo-gjsTIgV5Cw4U")
         sync = CustomAmazonSync(sheet_url)
         
-        # Get recent orders (last 2 hours to ensure we don't miss anything)
-        orders = sync.get_recent_orders(hours_back=2)
+        # Get recent orders (last 6 hours to handle sleep gaps - orders during 12:30-5:30 AM sleep time)
+        orders = sync.get_recent_orders(hours_back=6)
         
         # Sync to sheet
         sync.sync_orders_to_sheet(orders)
@@ -387,6 +387,8 @@ def main():
     print("   • Custom column formatting with dropdowns")
     print("   • Duplicate prevention")
     print("   • Sleep time: 12:30 AM - 5:30 AM IST")
+    print("   • Fetches orders from last 6 hours (handles sleep gaps)")
+    print("   • Total Amount column removed")
     
     try:
         # For local testing, you'll need to set environment variables
@@ -400,7 +402,7 @@ def main():
         sync = CustomAmazonSync(sheet_url)
         
         print("\n📥 Running one-time sync...")
-        orders = sync.get_recent_orders(hours_back=24)
+        orders = sync.get_recent_orders(hours_back=6)
         sync.sync_orders_to_sheet(orders)
         print("✅ Local sync complete!")
         
