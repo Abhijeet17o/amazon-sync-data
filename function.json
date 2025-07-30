@@ -1,0 +1,12 @@
+{
+  "scriptFile": "custom_column_sync.py",
+  "entryPoint": "azure_timer_handler",
+  "bindings": [
+    {
+      "name": "mytimer",
+      "type": "timerTrigger",
+      "direction": "in",
+      "schedule": "0 * * * * *"
+    }
+  ]
+}
