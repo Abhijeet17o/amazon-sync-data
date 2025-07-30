@@ -33,7 +33,6 @@ jobs:
     - name: 'Create Google Credentials File'
       run: |
         echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > google_credentials.json
-        popd
 
     - name: 'Deploy to Azure Functions'
       uses: Azure/functions-action@v1
