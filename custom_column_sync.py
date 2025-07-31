@@ -193,8 +193,6 @@ class CustomAmazonSync:
             print(f"⚠️ Could not update serial numbers: {e}")
             
         print(f"✅ Connected to Google Sheet: {self.spreadsheet.title}")
-        
-    def setup_dropdown_validations(self):
         """Setup dropdown menus for Print Status and SKU Status columns"""
         try:
             # Print Status dropdown (Column B - shifted due to Sr. No.)
