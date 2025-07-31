@@ -13,7 +13,7 @@ Features:
 
 Column Layout (Updated with Sr. No. and Ship Date):
 1. Sr. No., 2. Print Status, 3. SKU Status, 4. Order Status, 5. Product Name, 
-6. Quantity Ordered, 7. Order Summary, 8. Order ID, 9. Purchase Date,
+6. Quantitiy Ordered, 7. Order summary, 8. Order ID, 9. Purchase Date,
 10. Ship Date, 11. Buyer Name, 12. Ship City, 13. Ship State, 14. ASIN
 """
 
@@ -77,8 +77,8 @@ class CustomAmazonSync:
                 'SKU Status',       # Dropdown: Not Packed/Box Packed
                 'Order Status',     # Dynamic status from Amazon
                 'Product Name',
-                'Quantity Ordered',
-                'Order Summary',    # Shows "Item 1 of 3" etc.
+                'Quantitiy Ordered',  # Note: keeping your exact spelling "Quantitiy"
+                'Order summary',    # Shows "Item 1 of 3" etc. (lowercase 's')
                 'Order ID',
                 'Purchase Date',    # Formatted date
                 'Ship Date',        # Dynamic ship date from Amazon
