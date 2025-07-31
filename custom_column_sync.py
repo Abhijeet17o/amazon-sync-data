@@ -34,9 +34,11 @@ from google.oauth2.service_account import Credentials
 # Azure Functions imports
 try:
     import azure.functions as func
+    AZURE_AVAILABLE = True
 except ImportError:
     # azure.functions not available in local environment
     func = None
+    AZURE_AVAILABLE = False
 
 def get_amazon_credentials():
     """Get Amazon credentials from environment variables"""
@@ -350,15 +352,27 @@ def is_sleep_time():
     
     return sleep_start <= now <= sleep_end
 
-def azure_timer_handler():
+def azure_timer_handler(mytimer):
     """Azure Functions timer trigger handler"""
     try:
+        # Log timer information
+        logging.info(f'Timer trigger executed at: {datetime.now()}')
+        
         # Check if we're in sleep time (12:30 AM to 5:30 AM IST)
         if is_sleep_time():
             logging.info('😴 Sleeping time - No order checking until 5:30 AM')
             return "Sleeping - no sync during night hours"
         
         logging.info('🚀 Starting Amazon order sync...')
+        
+        # Validate environment variables
+        required_vars = ['AMAZON_REFRESH_TOKEN', 'AMAZON_LWA_APP_ID', 'AMAZON_LWA_CLIENT_SECRET']
+        missing_vars = [var for var in required_vars if not os.environ.get(var)]
+        
+        if missing_vars:
+            error_msg = f"Missing environment variables: {', '.join(missing_vars)}"
+            logging.error(error_msg)
+            raise ValueError(error_msg)
         
         # Initialize sync
         sheet_url = os.environ.get('GOOGLE_SHEET_URL', "https://docs.google.com/spreadsheets/d/1REsoseklT3qWeUVI7ngGrpLBe-6WPo-gjsTIgV5Cw4U")
