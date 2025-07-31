@@ -9,6 +9,7 @@ on:
 env:
   AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
   PYTHON_VERSION: '3.11'
+  AZURE_FUNCTIONAPP_NAME: 'simple-amazon-sync'
 
 jobs:
   deploy:
@@ -22,6 +23,17 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
 
+    - name: 'Verify Azure Function structure'
+      run: |
+        echo "🔍 Checking Azure Function structure..."
+        ls -la
+        echo "📁 TimerTrigger1 contents:"
+        ls -la TimerTrigger1/
+        echo "📄 host.json exists:" && test -f host.json && echo "✅ Yes" || echo "❌ No"
+        echo "📄 requirements.txt exists:" && test -f requirements.txt && echo "✅ Yes" || echo "❌ No"
+        echo "📄 function.json exists:" && test -f TimerTrigger1/function.json && echo "✅ Yes" || echo "❌ No"
+        echo "📄 __init__.py exists:" && test -f TimerTrigger1/__init__.py && echo "✅ Yes" || echo "❌ No"
+
     - name: 'Resolve Project Dependencies Using Pip'
       shell: bash
       run: |
@@ -31,13 +43,39 @@ jobs:
     - name: 'Create Google Credentials File'
       run: |
         echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > google_credentials.json
+        echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > TimerTrigger1/google_credentials.json
+        echo "✅ Google credentials created"
+
+    - name: 'Validate Deployment Package'
+      run: |
+        echo "📦 Final package structure:"
+        find . -name "*.py" -o -name "*.json" | head -20
+        echo "📊 Package size:"
+        du -sh .
 
     - name: 'Deploy to Azure Functions'
       uses: Azure/functions-action@v1
       id: deploy-to-function
       with:
-        app-name: 'simple-amazon-sync'
+        app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
         package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
         publish-profile: ${{ secrets.AZURE_PUBLISH_PROFILE }}
         scm-do-build-during-deployment: true
         enable-oryx-build: true
+
+    - name: 'Deployment Success'
+      if: success()
+      run: |
+        echo "🎉 Deployment successful!"
+        echo "🔗 Function App: ${{ env.AZURE_FUNCTIONAPP_NAME }}"
+        echo "⏰ Timer trigger will run every minute (sleep: 12:30-5:30 AM IST)"
+
+    - name: 'Deployment Failed'
+      if: failure()
+      run: |
+        echo "❌ Deployment failed!"
+        echo "💡 Common solutions:"
+        echo "1. Check Azure Function App name: ${{ env.AZURE_FUNCTIONAPP_NAME }}"
+        echo "2. Verify AZURE_PUBLISH_PROFILE secret is correct"
+        echo "3. Ensure Azure Function App exists and is running"
+        echo "4. Check Azure portal for detailed logs"
