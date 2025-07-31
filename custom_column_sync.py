@@ -67,6 +67,10 @@ class CustomAmazonSync:
         # Get or create Orders worksheet
         try:
             self.worksheet = self.spreadsheet.worksheet('Orders')
+            
+            # Update headers to match new format if they're outdated
+            self.update_headers_if_needed()
+            
         except gspread.WorksheetNotFound:
             self.worksheet = self.spreadsheet.add_worksheet(title='Orders', rows=1000, cols=14)
             
@@ -91,6 +95,102 @@ class CustomAmazonSync:
             
             # Setup dropdown validations
             self.setup_dropdown_validations()
+            
+        print(f"✅ Connected to Google Sheet: {self.spreadsheet.title}")
+    
+    def update_headers_if_needed(self):
+        """Update existing worksheet headers to match new format"""
+        try:
+            # Get current headers (first row)
+            current_headers = self.worksheet.row_values(1)
+            
+            # Define the correct headers
+            correct_headers = [
+                'Sr. No.',          # Auto-incrementing serial number
+                'Print Status',      # Dropdown: Not Printed/Printed
+                'SKU Status',       # Dropdown: Not Packed/Box Packed
+                'Order Status',     # Dynamic status from Amazon
+                'Product Name',
+                'Quantitiy Ordered',  # Note: keeping your exact spelling "Quantitiy"
+                'Order summary',    # Shows "Item 1 of 3" etc. (lowercase 's')
+                'Order ID',
+                'Purchase Date',    # Formatted date
+                'Ship Date',        # Dynamic ship date from Amazon
+                'Buyer Name',
+                'Ship City',
+                'Ship State',
+                'ASIN'
+            ]
+            
+            # Check if headers need updating
+            headers_need_update = False
+            
+            # If we don't have the right number of columns or different headers
+            if len(current_headers) != len(correct_headers):
+                headers_need_update = True
+            else:
+                for i, (current, correct) in enumerate(zip(current_headers, correct_headers)):
+                    if current != correct:
+                        headers_need_update = True
+                        break
+            
+            if headers_need_update:
+                print("🔄 Updating worksheet headers to new format...")
+                
+                # Update the header row
+                self.worksheet.update('A1:N1', [correct_headers])
+                
+                # Update serial numbers for existing data
+                self.update_serial_numbers_for_existing_data()
+                
+                print("✅ Headers updated successfully!")
+            else:
+                print("ℹ️ Headers are already in correct format")
+                
+        except Exception as e:
+            print(f"⚠️ Could not update headers: {e}")
+    
+    def update_serial_numbers_for_existing_data(self):
+        """Add serial numbers to existing data starting from 193"""
+        try:
+            existing_data = self.worksheet.get_all_values()
+            if len(existing_data) <= 1:
+                return  # No data to update
+            
+            print("🔢 Adding serial numbers to existing orders...")
+            
+            # Get all rows except header
+            data_rows = existing_data[1:]
+            
+            # Group by Order ID to assign same serial number to items from same order
+            order_groups = {}
+            for i, row in enumerate(data_rows):
+                if len(row) > 7:  # Make sure we have Order ID column
+                    order_id = row[7] if len(row) > 7 else f"unknown_{i}"
+                    if order_id not in order_groups:
+                        order_groups[order_id] = []
+                    order_groups[order_id].append(i + 2)  # +2 because row index starts from 2 (after header)
+            
+            # Assign serial numbers starting from 193
+            serial_number = 193
+            updates = []
+            
+            for order_id, row_indices in order_groups.items():
+                # All rows with same order ID get same serial number
+                for row_index in row_indices:
+                    updates.append({
+                        'range': f'A{row_index}',
+                        'values': [[str(serial_number)]]
+                    })
+                serial_number += 1
+            
+            # Batch update all serial numbers
+            if updates:
+                self.worksheet.batch_update(updates)
+                print(f"✅ Added serial numbers to {len(updates)} rows, starting from 193")
+            
+        except Exception as e:
+            print(f"⚠️ Could not update serial numbers: {e}")
             
         print(f"✅ Connected to Google Sheet: {self.spreadsheet.title}")
         
