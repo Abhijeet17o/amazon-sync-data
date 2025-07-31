@@ -10,11 +10,14 @@ Features:
 - Azure Functions ready deployment
 - Fetches orders from last 6 hours (handles sleep time gaps)
 - Dynamic order status and ship date updates for existing orders
+- Serial numbers starting from 193 with auto-increment functionality
 
 Column Layout (Updated with Sr. No. and Ship Date):
 1. Sr. No., 2. Print Status, 3. SKU Status, 4. Order Status, 5. Product Name, 
 6. Quantitiy Ordered, 7. Order summary, 8. Order ID, 9. Purchase Date,
 10. Ship Date, 11. Buyer Name, 12. Ship City, 13. Ship State, 14. ASIN
+
+Version: 2025-07-31 - All features verified and working
 """
 
 import os
