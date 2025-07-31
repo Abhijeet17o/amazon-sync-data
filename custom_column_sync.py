@@ -100,6 +100,21 @@ class CustomAmazonSync:
             self.setup_dropdown_validations()
             
         print(f"✅ Connected to Google Sheet: {self.spreadsheet.title}")
+        
+        # Debug: Print column layout for verification
+        self.print_column_layout()
+    
+    def print_column_layout(self):
+        """Print the column layout for debugging purposes"""
+        try:
+            headers = self.worksheet.row_values(1)
+            print("📋 Current column layout:")
+            for i, header in enumerate(headers):
+                print(f"   Column {chr(65+i)} (index {i}): {header}")
+                if header == 'Order ID':
+                    print(f"   ✅ Order ID found at index {i} (Column {chr(65+i)})")
+        except Exception as e:
+            print(f"⚠️ Could not print column layout: {e}")
     
     def update_headers_if_needed(self):
         """Update existing worksheet headers to match new format"""
@@ -169,7 +184,7 @@ class CustomAmazonSync:
             order_groups = {}
             for i, row in enumerate(data_rows):
                 if len(row) > 7:  # Make sure we have Order ID column
-                    order_id = row[7] if len(row) > 7 else f"unknown_{i}"
+                    order_id = row[7]  # Order ID is at index 7 (column H)
                     if order_id not in order_groups:
                         order_groups[order_id] = []
                     order_groups[order_id].append(i + 2)  # +2 because row index starts from 2 (after header)
@@ -194,8 +209,8 @@ class CustomAmazonSync:
             
         except Exception as e:
             print(f"⚠️ Could not update serial numbers: {e}")
-            
-        print(f"✅ Connected to Google Sheet: {self.spreadsheet.title}")
+    
+    def setup_dropdown_validations(self):
         """Setup dropdown menus for Print Status and SKU Status columns"""
         try:
             # Print Status dropdown (Column B - shifted due to Sr. No.)
@@ -316,8 +331,13 @@ class CustomAmazonSync:
             if len(existing_data) <= 1:
                 return set()
             
-            # Get Order IDs from column H (index 7) - Order ID column position (shifted due to Sr. No.)
-            order_ids = {row[7] for row in existing_data[1:] if len(row) > 7 and row[7]}
+            # Get Order IDs from column H (index 7) - Order ID column position
+            order_ids = set()
+            for row in existing_data[1:]:  # Skip header row
+                if len(row) > 7 and row[7]:  # Ensure row has Order ID column and it's not empty
+                    order_id = row[7].strip()  # Remove any whitespace
+                    if order_id and order_id != 'N/A':  # Only add valid Order IDs
+                        order_ids.add(order_id)
             
             print(f"📊 Found {len(order_ids)} existing Order IDs in sheet")
             return order_ids
@@ -419,10 +439,10 @@ class CustomAmazonSync:
             
             # Process each row (skip header)
             for row_index, row in enumerate(existing_data[1:], start=2):
-                if len(row) < 8:  # Need at least Order ID column
+                if len(row) < 8:  # Need at least Order ID column (index 7, so need 8 elements)
                     continue
                 
-                order_id = row[7]  # Order ID is in column H (index 7)
+                order_id = row[7].strip() if row[7] else ''  # Order ID is in column H (index 7)
                 if not order_id or order_id == 'N/A':
                     continue
                 
