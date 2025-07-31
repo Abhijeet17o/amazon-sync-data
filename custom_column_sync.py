@@ -9,12 +9,12 @@ Features:
 - Duplicate prevention and custom column formatting
 - Azure Functions ready deployment
 - Fetches orders from last 6 hours (handles sleep time gaps)
-- Total Amount column removed as requested
+- Dynamic order status and ship date updates for existing orders
 
-Column Layout (Total Amount removed):
-1. Print Status, 2. SKU Status, 3. Order Status, 4. Product Name, 
-5. Quantity Ordered, 6. Order Summary, 7. Order ID, 8. Purchase Date,
-9. Buyer Name, 10. Ship City, 11. Ship State, 12. ASIN
+Column Layout (Updated with Sr. No. and Ship Date):
+1. Sr. No., 2. Print Status, 3. SKU Status, 4. Order Status, 5. Product Name, 
+6. Quantity Ordered, 7. Order Summary, 8. Order ID, 9. Purchase Date,
+10. Ship Date, 11. Buyer Name, 12. Ship City, 13. Ship State, 14. ASIN
 """
 
 import os
@@ -68,18 +68,20 @@ class CustomAmazonSync:
         try:
             self.worksheet = self.spreadsheet.worksheet('Orders')
         except gspread.WorksheetNotFound:
-            self.worksheet = self.spreadsheet.add_worksheet(title='Orders', rows=1000, cols=12)
+            self.worksheet = self.spreadsheet.add_worksheet(title='Orders', rows=1000, cols=14)
             
-            # Add headers in exact sequence requested (Total Amount removed)
+            # Add headers in exact sequence requested (with Sr. No. and Ship Date)
             headers = [
+                'Sr. No.',          # Auto-incrementing serial number
                 'Print Status',      # Dropdown: Not Printed/Printed
                 'SKU Status',       # Dropdown: Not Packed/Box Packed
-                'Order Status',
+                'Order Status',     # Dynamic status from Amazon
                 'Product Name',
                 'Quantity Ordered',
                 'Order Summary',    # Shows "Item 1 of 3" etc.
                 'Order ID',
                 'Purchase Date',    # Formatted date
+                'Ship Date',        # Dynamic ship date from Amazon
                 'Buyer Name',
                 'Ship City',
                 'Ship State',
@@ -95,7 +97,7 @@ class CustomAmazonSync:
     def setup_dropdown_validations(self):
         """Setup dropdown menus for Print Status and SKU Status columns"""
         try:
-            # Print Status dropdown (Column A)
+            # Print Status dropdown (Column B - shifted due to Sr. No.)
             print_status_rule = {
                 "requests": [
                     {
@@ -104,8 +106,8 @@ class CustomAmazonSync:
                                 "sheetId": self.worksheet.id,
                                 "startRowIndex": 1,  # Start from row 2 (after header)
                                 "endRowIndex": 1000,  # Apply to 1000 rows
-                                "startColumnIndex": 0,  # Column A
-                                "endColumnIndex": 1
+                                "startColumnIndex": 1,  # Column B (was A)
+                                "endColumnIndex": 2
                             },
                             "rule": {
                                 "condition": {
@@ -123,7 +125,7 @@ class CustomAmazonSync:
                 ]
             }
             
-            # SKU Status dropdown (Column B)
+            # SKU Status dropdown (Column C - shifted due to Sr. No.)
             sku_status_rule = {
                 "requests": [
                     {
@@ -132,8 +134,8 @@ class CustomAmazonSync:
                                 "sheetId": self.worksheet.id,
                                 "startRowIndex": 1,  # Start from row 2 (after header)
                                 "endRowIndex": 1000,  # Apply to 1000 rows
-                                "startColumnIndex": 1,  # Column B
-                                "endColumnIndex": 2
+                                "startColumnIndex": 2,  # Column C (was B)
+                                "endColumnIndex": 3
                             },
                             "rule": {
                                 "condition": {
@@ -179,6 +181,33 @@ class CustomAmazonSync:
             print(f"⚠️ Date formatting error: {e}")
             return date_string
     
+    def get_next_serial_number(self):
+        """Get the next serial number starting from 193"""
+        try:
+            existing_data = self.worksheet.get_all_values()
+            if len(existing_data) <= 1:
+                return 193  # Start from 193 if no data
+            
+            # Get serial numbers from column A (index 0)
+            serial_numbers = []
+            for row in existing_data[1:]:  # Skip header
+                if len(row) > 0 and row[0]:
+                    try:
+                        serial_numbers.append(int(row[0]))
+                    except ValueError:
+                        continue  # Skip non-numeric values
+            
+            if not serial_numbers:
+                return 193  # Start from 193 if no valid serial numbers
+            
+            # Return the highest serial number + 1, but ensure minimum is 193
+            next_serial = max(serial_numbers) + 1
+            return max(next_serial, 193)
+            
+        except Exception as e:
+            print(f"⚠️ Could not get serial number: {e}")
+            return 193  # Default to 193 on error
+    
     def get_existing_unique_ids(self):
         """Get existing order IDs to prevent duplicates"""
         try:
@@ -186,8 +215,8 @@ class CustomAmazonSync:
             if len(existing_data) <= 1:
                 return set()
             
-            # Get Order IDs from column G (index 6) - Order ID column position
-            order_ids = {row[6] for row in existing_data[1:] if len(row) > 6 and row[6]}
+            # Get Order IDs from column H (index 7) - Order ID column position (shifted due to Sr. No.)
+            order_ids = {row[7] for row in existing_data[1:] if len(row) > 7 and row[7]}
             
             print(f"📊 Found {len(order_ids)} existing Order IDs in sheet")
             return order_ids
@@ -228,6 +257,126 @@ class CustomAmazonSync:
         except Exception as e:
             print(f"❌ Error getting order details for {order_id}: {e}")
             return []
+    
+    def get_ship_date(self, order, order_items):
+        """Get ship date from order or order items"""
+        try:
+            # Check multiple possible ship date fields from Amazon SP-API
+            
+            # 1. Check order-level ship date fields
+            ship_date_fields = ['ShipDate', 'LatestShipDate', 'EarliestShipDate']
+            for field in ship_date_fields:
+                ship_date = order.get(field, None)
+                if ship_date:
+                    return self.format_purchase_date(ship_date)
+            
+            # 2. Check order items for shipping info
+            for item in order_items:
+                # Check item-level ship date fields
+                item_ship_fields = ['ShipDate', 'LatestShipDate', 'EarliestShipDate']
+                for field in item_ship_fields:
+                    ship_date = item.get(field, None)
+                    if ship_date:
+                        return self.format_purchase_date(ship_date)
+            
+            # 3. Check for fulfillment data in order items
+            for item in order_items:
+                fulfillment_data = item.get('FulfillmentData', {})
+                if fulfillment_data:
+                    ship_date = fulfillment_data.get('ShipDate', None)
+                    if ship_date:
+                        return self.format_purchase_date(ship_date)
+            
+            # 4. If no ship date found, return based on order status
+            order_status = order.get('OrderStatus', '').lower()
+            if order_status in ['pending', 'unshipped', 'partiallyshipped']:
+                return 'Pending'
+            elif order_status == 'shipped':
+                return 'Shipped (Date TBD)'
+            elif order_status in ['delivered', 'invoiceunconfirmed']:
+                return 'Delivered (Date TBD)'
+            elif order_status == 'canceled':
+                return 'Canceled'
+            else:
+                return 'N/A'
+                
+        except Exception as e:
+            print(f"⚠️ Error getting ship date: {e}")
+            return 'N/A'
+    
+    def update_existing_orders(self):
+        """Update order status and ship date for existing orders in the sheet"""
+        try:
+            print("🔄 Checking for updates to existing orders...")
+            
+            existing_data = self.worksheet.get_all_values()
+            if len(existing_data) <= 1:
+                print("ℹ️ No existing orders to update")
+                return
+            
+            updated_count = 0
+            
+            # Process each row (skip header)
+            for row_index, row in enumerate(existing_data[1:], start=2):
+                if len(row) < 8:  # Need at least Order ID column
+                    continue
+                
+                order_id = row[7]  # Order ID is in column H (index 7)
+                if not order_id or order_id == 'N/A':
+                    continue
+                
+                current_order_status = row[3]  # Order Status is in column D (index 3)
+                current_ship_date = row[9] if len(row) > 9 else 'N/A'  # Ship Date is in column J (index 9)
+                
+                # Get latest order data from Amazon
+                try:
+                    amazon_credentials = get_amazon_credentials()
+                    orders_api = Orders(marketplace=Marketplaces.IN, credentials=amazon_credentials)
+                    
+                    # Get order details
+                    order_response = orders_api.get_order(order_id)
+                    order_data = order_response.payload
+                    
+                    # Get order items for ship date info
+                    order_items = self.get_order_details(order_id)
+                    
+                    # Get latest status and ship date
+                    latest_order_status = order_data.get('OrderStatus', 'N/A')
+                    latest_ship_date = self.get_ship_date(order_data, order_items)
+                    
+                    # Check if updates are needed
+                    status_changed = current_order_status != latest_order_status
+                    ship_date_changed = current_ship_date != latest_ship_date
+                    
+                    if status_changed or ship_date_changed:
+                        print(f"🔄 Updating order {order_id}:")
+                        
+                        if status_changed:
+                            print(f"   📊 Status: {current_order_status} → {latest_order_status}")
+                            # Update Order Status (column D)
+                            self.worksheet.update_cell(row_index, 4, latest_order_status)
+                        
+                        if ship_date_changed:
+                            print(f"   📅 Ship Date: {current_ship_date} → {latest_ship_date}")
+                            # Update Ship Date (column J)
+                            self.worksheet.update_cell(row_index, 10, latest_ship_date)
+                        
+                        updated_count += 1
+                        
+                        # Small delay to avoid API rate limits
+                        time.sleep(0.5)
+                    
+                except Exception as order_error:
+                    print(f"⚠️ Could not update order {order_id}: {order_error}")
+                    continue
+            
+            if updated_count > 0:
+                print(f"✅ Updated {updated_count} existing orders")
+            else:
+                print("ℹ️ No existing orders needed updates")
+                
+        except Exception as e:
+            print(f"❌ Error updating existing orders: {e}")
     
     def sync_orders_to_sheet(self, orders):
         """Add new orders to Google Sheet with custom formatting"""
@@ -270,6 +419,12 @@ class CustomAmazonSync:
             # Format purchase date
             formatted_date = self.format_purchase_date(order.get('PurchaseDate', ''))
             
+            # Get ship date
+            ship_date = self.get_ship_date(order, order_items)
+            
+            # Get next serial number for this order (same for all items in the order)
+            serial_number = self.get_next_serial_number()
+            
             if order_items:
                 total_items_in_order = len(order_items)
                 
@@ -279,21 +434,21 @@ class CustomAmazonSync:
                     if total_items_in_order > 1:
                         order_summary += f" 📦 SAME ORDER"
                     
-                    # Get order status and convert "Shipped" to "Ordered"
+                    # Get order status (no more conversion from "Shipped" to "Ordered")
                     order_status = order.get('OrderStatus', 'N/A')
-                    if order_status.lower() == 'shipped':
-                        order_status = 'Ordered'
                     
-                    # Create row data in new column order (Total Amount removed)
+                    # Create row data in new column order (with Sr. No. and Ship Date)
                     row_data = [
+                        str(serial_number), # Sr. No. (same for all items in order)
                         'Not Printed',  # Print Status (default)
                         'Not Packed',   # SKU Status (default)
-                        order_status,   # Order Status (converted from "Shipped" to "Ordered")
+                        order_status,   # Order Status (no conversion)
                         item.get('Title', 'N/A'),
                         str(item.get('QuantityOrdered', 0)),
                         order_summary,  # Order Summary
                         order_id,       # Order ID
                         formatted_date,
+                        ship_date,      # Ship Date
                         buyer_name,
                         ship_city,
                         ship_state,
@@ -315,20 +470,26 @@ class CustomAmazonSync:
                         
             else:
                 # Handle orders without items
-                # Get order status and convert "Shipped" to "Ordered"
+                # Get order status (no more conversion from "Shipped" to "Ordered")
                 order_status = order.get('OrderStatus', 'N/A')
-                if order_status.lower() == 'shipped':
-                    order_status = 'Ordered'
+                
+                # Get ship date for this order
+                ship_date = self.get_ship_date(order, [])
+                
+                # Get serial number for this order
+                serial_number = self.get_next_serial_number()
                 
                 row_data = [
+                    str(serial_number), # Sr. No.
                     'Not Printed',  # Print Status (default)
                     'Not Packed',   # SKU Status (default)
-                    order_status,   # Order Status (converted from "Shipped" to "Ordered")
+                    order_status,   # Order Status (no conversion)
                     'No items found',
                     '0',
                     'Single Item',  # Order summary
                     order_id,       # Order ID
                     formatted_date,
+                    ship_date,      # Ship Date
                     buyer_name,
                     ship_city,
                     ship_state,
@@ -339,9 +500,13 @@ class CustomAmazonSync:
                 new_orders_added += 1
                 existing_order_ids.add(order_id)
         
-        print(f"🎉 Sync complete!")
+        print(f"🎉 New orders sync complete!")
         print(f"✅ Added {new_orders_added} new orders")
         print(f"⏭️ Skipped {skipped_duplicates} duplicates")
+        
+        # Update existing orders for dynamic status and ship date changes
+        self.update_existing_orders()
+        
         print(f"🎯 Dropdowns ready for Print Status and SKU Status columns")
 
 def is_sleep_time():
@@ -402,7 +567,10 @@ def main():
     print("   • Duplicate prevention")
     print("   • Sleep time: 12:30 AM - 5:30 AM IST")
     print("   • Fetches orders from last 6 hours (handles sleep gaps)")
-    print("   • Total Amount column removed")
+    print("   • Auto-incrementing serial numbers starting from 193")
+    print("   • Dynamic ship date tracking with real-time updates")
+    print("   • Dynamic order status updates for existing orders")
+    print("   • Original order status (no Shipped->Ordered conversion)")
     
     try:
         # For local testing, you'll need to set environment variables
