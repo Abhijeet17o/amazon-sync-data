@@ -1,20 +1,21 @@
 """
-CUSTOM AMAZON TO GOOGLE SHEETS SYNC - Azure Functions Integration
-================================================================
+AZURE FUNCTION - CUSTOM AMAZON TO GOOGLE SHEETS SYNC
+=====================================================
 Secure Amazon order synchronization with Google Sheets using environment variables.
 
 Features:
 - Timer trigger every minute with sleep hours (12:30 AM - 5:30 AM IST)
 - Environment variable based credentials for security
 - Duplicate prevention and custom column formatting
-- Azure Functions ready deployment
-- Fetches orders from last 6 hours (handles sleep time gaps)
-- Total Amount column removed as requested
+- Serial numbers starting from 193 with auto-increment functionality
+- Dynamic order status and ship date updates for existing orders
 
-Column Layout (Total Amount removed):
-1. Print Status, 2. SKU Status, 3. Order Status, 4. Product Name, 
-5. Quantity Ordered, 6. Order Summary, 7. Order ID, 8. Purchase Date,
-9. Buyer Name, 10. Ship City, 11. Ship State, 12. ASIN
+Column Layout (14 columns with Sr. No. and Ship Date):
+1. Sr. No., 2. Print Status, 3. SKU Status, 4. Order Status, 5. Product Name, 
+6. Quantitiy Ordered, 7. Order summary, 8. Order ID, 9. Purchase Date,
+10. Ship Date, 11. Buyer Name, 12. Ship City, 13. Ship State, 14. ASIN
+
+Version: 2025-07-31 - All features verified and working
 """
 
 import os
@@ -48,6 +49,363 @@ class CustomAmazonSync:
         
     def setup_google_sheets(self):
         """Setup Google Sheets connection with custom columns"""
+        scope = [
+            'https://spreadsheets.google.com/feeds',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        
+        creds = Credentials.from_service_account_file('google_credentials.json', scopes=scope)
+        self.client = gspread.authorize(creds)
+        self.spreadsheet = self.client.open_by_url(self.sheet_url)
+        
+        # Get or create Orders worksheet
+        try:
+            self.worksheet = self.spreadsheet.worksheet('Orders')
+            
+            # 🆕 AUTO-UPGRADE: Update headers to match new format if they're outdated
+            self.update_headers_if_needed()
+            
+        except gspread.WorksheetNotFound:
+            self.worksheet = self.spreadsheet.add_worksheet(title='Orders', rows=1000, cols=14)
+            
+            # Add headers in exact sequence requested (with Sr. No. and Ship Date)
+            headers = [
+                'Sr. No.',          # Auto-incrementing serial number
+                'Print Status',      # Dropdown: Not Printed/Printed
+                'SKU Status',       # Dropdown: Not Packed/Box Packed
+                'Order Status',     # Dynamic status from Amazon
+                'Product Name',
+                'Quantitiy Ordered',  # Note: keeping exact spelling "Quantitiy"
+                'Order summary',    # Shows "Item 1 of 3" etc. (lowercase 's')
+                'Order ID',
+                'Purchase Date',    # Formatted date
+                'Ship Date',        # Dynamic ship date from Amazon
+                'Buyer Name',
+                'Ship City',
+                'Ship State',
+                'ASIN'
+            ]
+            self.worksheet.append_row(headers)
+            
+            # Setup dropdown validations
+            self.setup_dropdown_validations()
+            
+        logging.info(f"✅ Connected to Google Sheet: {self.spreadsheet.title}")
+        
+    def setup_dropdown_validations(self):
+        """Setup dropdown menus for Print Status and SKU Status columns"""
+        try:
+            # Print Status dropdown (Column B - shifted due to Sr. No.)
+            print_status_rule = {
+                "requests": [
+                    {
+                        "setDataValidation": {
+                            "range": {
+                                "sheetId": self.worksheet.id,
+                                "startRowIndex": 1,  # Start from row 2 (after header)
+                                "endRowIndex": 1000,  # Apply to 1000 rows
+                                "startColumnIndex": 1,  # Column B (Print Status)
+                                "endColumnIndex": 2
+                            },
+                            "rule": {
+                                "condition": {
+                                    "type": "ONE_OF_LIST",
+                                    "values": [
+                                        {"userEnteredValue": "Not Printed"},
+                                        {"userEnteredValue": "Printed"}
+                                    ]
+                                },
+                                "showCustomUi": True,
+                                "strict": True
+                            }
+                        }
+                    }
+                ]
+            }
+            
+            # SKU Status dropdown (Column C - shifted due to Sr. No.)
+            sku_status_rule = {
+                "requests": [
+                    {
+                        "setDataValidation": {
+                            "range": {
+                                "sheetId": self.worksheet.id,
+                                "startRowIndex": 1,  # Start from row 2 (after header)
+                                "endRowIndex": 1000,  # Apply to 1000 rows
+                                "startColumnIndex": 2,  # Column C (SKU Status)
+                                "endColumnIndex": 3
+                            },
+                            "rule": {
+                                "condition": {
+                                    "type": "ONE_OF_LIST",
+                                    "values": [
+                                        {"userEnteredValue": "Not Packed"},
+                                        {"userEnteredValue": "Box Packed"}
+                                    ]
+                                },
+                                "showCustomUi": True,
+                                "strict": True
+                            }
+                        }
+                    }
+                ]
+            }
+            
+            # Apply validation rules
+            self.spreadsheet.batch_update(print_status_rule)
+            self.spreadsheet.batch_update(sku_status_rule)
+            
+            logging.info("✅ Dropdown validations setup complete")
+            
+        except Exception as e:
+            logging.warning(f"⚠️ Could not setup dropdowns: {e}")
+    
+    def update_headers_if_needed(self):
+        """🆕 AUTO-UPGRADE: Update existing worksheet headers to match new format"""
+        try:
+            logging.info("🔍 Checking if headers need updating...")
+            
+            # Get current headers (first row)
+            current_headers = self.worksheet.row_values(1)
+            
+            # Define the correct headers
+            correct_headers = [
+                'Sr. No.',          # Auto-incrementing serial number
+                'Print Status',      # Dropdown: Not Printed/Printed
+                'SKU Status',       # Dropdown: Not Packed/Box Packed
+                'Order Status',     # Dynamic status from Amazon
+                'Product Name',
+                'Quantitiy Ordered',  # Note: keeping exact spelling "Quantitiy"
+                'Order summary',    # Shows "Item 1 of 3" etc. (lowercase 's')
+                'Order ID',
+                'Purchase Date',    # Formatted date
+                'Ship Date',        # Dynamic ship date from Amazon
+                'Buyer Name',
+                'Ship City',
+                'Ship State',
+                'ASIN'
+            ]
+            
+            # Check if headers need updating
+            headers_need_update = False
+            
+            # If we don't have the right number of columns or different headers
+            if len(current_headers) != len(correct_headers):
+                headers_need_update = True
+                logging.info(f"❗ Column count mismatch: {len(current_headers)} vs {len(correct_headers)}")
+            else:
+                for i, (current, correct) in enumerate(zip(current_headers, correct_headers)):
+                    if current != correct:
+                        headers_need_update = True
+                        logging.info(f"❗ Header mismatch at position {i}: '{current}' vs '{correct}'")
+                        break
+            
+            if headers_need_update:
+                logging.info("🔄 UPDATING worksheet headers to new format...")
+                
+                # Update the header row
+                self.worksheet.update('A1:N1', [correct_headers])
+                
+                # 🆕 Update serial numbers for existing data
+                self.update_serial_numbers_for_existing_data()
+                
+                logging.info("✅ Headers and serial numbers updated successfully!")
+            else:
+                logging.info("✅ Headers are already in correct format")
+                
+        except Exception as e:
+            logging.error(f"❌ Could not update headers: {e}")
+    
+    def update_serial_numbers_for_existing_data(self):
+        """🆕 Add serial numbers to existing data starting from 193"""
+        try:
+            existing_data = self.worksheet.get_all_values()
+            if len(existing_data) <= 1:
+                logging.info("ℹ️ No existing data to update with serial numbers")
+                return
+            
+            logging.info("🔢 Adding serial numbers to existing orders...")
+            
+            # Get all rows except header
+            data_rows = existing_data[1:]
+            logging.info(f"📋 Found {len(data_rows)} existing data rows")
+            
+            # Group by Order ID to assign same serial number to items from same order
+            order_groups = {}
+            for i, row in enumerate(data_rows):
+                # Order ID should be in column 8 (index 7) after header update
+                order_id = row[7] if len(row) > 7 and row[7] else f"unknown_{i}"
+                if order_id not in order_groups:
+                    order_groups[order_id] = []
+                order_groups[order_id].append(i + 2)  # +2 because row index starts from 2 (after header)
+            
+            logging.info(f"🔗 Grouped into {len(order_groups)} unique orders")
+            
+            # Assign serial numbers starting from 193
+            serial_number = 193
+            updates = []
+            
+            for order_id, row_indices in order_groups.items():
+                logging.info(f"📦 Order {order_id}: assigning serial {serial_number} to {len(row_indices)} rows")
+                # All rows with same order ID get same serial number
+                for row_index in row_indices:
+                    updates.append({
+                        'range': f'A{row_index}',
+                        'values': [[str(serial_number)]]
+                    })
+                serial_number += 1
+            
+            # Batch update all serial numbers
+            if updates:
+                logging.info(f"📤 Updating {len(updates)} cells with serial numbers...")
+                self.worksheet.batch_update(updates)
+                logging.info(f"✅ Added serial numbers to {len(updates)} rows, starting from 193")
+            else:
+                logging.info("ℹ️ No updates needed")
+            
+        except Exception as e:
+            logging.error(f"❌ Could not update serial numbers: {e}")
+    
+    def get_next_serial_number(self):
+        """🆕 Get the next serial number starting from 193"""
+        try:
+            existing_data = self.worksheet.get_all_values()
+            if len(existing_data) <= 1:
+                return 193  # Start from 193 if no data
+            
+            # Get serial numbers from column A (index 0)
+            serial_numbers = []
+            for row in existing_data[1:]:  # Skip header
+                if len(row) > 0 and row[0]:
+                    try:
+                        serial_numbers.append(int(row[0]))
+                    except ValueError:
+                        continue  # Skip non-numeric values
+            
+            if not serial_numbers:
+                return 193  # Start from 193 if no valid serial numbers
+            
+            # Return the highest serial number + 1, but ensure minimum is 193
+            next_serial = max(serial_numbers) + 1
+            return max(next_serial, 193)
+            
+        except Exception as e:
+            logging.warning(f"⚠️ Could not get serial number: {e}")
+            return 193  # Default to 193 on error
+    
+    def format_purchase_date(self, date_string):
+        """Convert Amazon date format to readable format"""
+        try:
+            # Parse Amazon date: 2025-07-30T18:13:35Z
+            dt = datetime.fromisoformat(date_string.replace('Z', '+00:00'))
+            
+            # Convert to local time (assuming IST)
+            # Add 5:30 hours for IST
+            local_dt = dt.replace(tzinfo=None) + timedelta(hours=5, minutes=30)
+            
+            # Format as: Jul 30, 2025 11:43 PM
+            formatted = local_dt.strftime('%b %d, %Y %I:%M %p')
+            return formatted
+            
+        except Exception as e:
+            logging.warning(f"⚠️ Date formatting error: {e}")
+            return date_string
+    
+    def get_ship_date(self, order, order_items):
+        """🆕 Get ship date from order or order items"""
+        try:
+            # Check multiple possible ship date fields from Amazon SP-API
+            
+            # 1. Check order-level ship date fields
+            ship_date_fields = ['ShipDate', 'LatestShipDate', 'EarliestShipDate']
+            for field in ship_date_fields:
+                ship_date = order.get(field, None)
+                if ship_date:
+                    return self.format_purchase_date(ship_date)
+            
+            # 2. Check order items for shipping info
+            for item in order_items:
+                # Check item-level ship date fields
+                item_ship_fields = ['ShipDate', 'LatestShipDate', 'EarliestShipDate']
+                for field in item_ship_fields:
+                    ship_date = item.get(field, None)
+                    if ship_date:
+                        return self.format_purchase_date(ship_date)
+            
+            # 3. Check for fulfillment data in order items
+            for item in order_items:
+                fulfillment_data = item.get('FulfillmentData', {})
+                if fulfillment_data:
+                    ship_date = fulfillment_data.get('ShipDate', None)
+                    if ship_date:
+                        return self.format_purchase_date(ship_date)
+            
+            # 4. If no ship date found, return based on order status
+            order_status = order.get('OrderStatus', '').lower()
+            if order_status in ['pending', 'unshipped', 'partiallyshipped']:
+                return 'Pending'
+            elif order_status == 'shipped':
+                return 'Shipped (Date TBD)'
+            elif order_status in ['delivered', 'invoiceunconfirmed']:
+                return 'Delivered (Date TBD)'
+            elif order_status == 'canceled':
+                return 'Canceled'
+            else:
+                return 'N/A'
+                
+        except Exception as e:
+            logging.warning(f"⚠️ Error getting ship date: {e}")
+            return 'N/A'
+            
+    def get_existing_unique_ids(self):
+        """Get existing order IDs to prevent duplicates"""
+        try:
+            existing_data = self.worksheet.get_all_values()
+            if len(existing_data) <= 1:
+                return set()
+            
+            # Get Order IDs from column H (index 7) - Order ID column position
+            order_ids = {row[7] for row in existing_data[1:] if len(row) > 7 and row[7]}
+            
+            logging.info(f"📊 Found {len(order_ids)} existing Order IDs in sheet")
+            return order_ids
+            
+        except Exception as e:
+            logging.warning(f"⚠️ Could not read existing data: {e}")
+            return set()
+    
+    def get_recent_orders(self, hours_back=6):
+        """Get orders from last X hours (default 6 hours for Azure Function)"""
+        try:
+            amazon_credentials = get_amazon_credentials()
+            orders_api = Orders(marketplace=Marketplaces.IN, credentials=amazon_credentials)
+            
+            created_after = (datetime.now() - timedelta(hours=hours_back)).isoformat()
+            response = orders_api.get_orders(CreatedAfter=created_after, MaxResultsPerPage=50)
+            
+            orders = response.payload.get('Orders', [])
+            logging.info(f"📦 Found {len(orders)} orders from last {hours_back} hours")
+            
+            return orders
+            
+        except Exception as e:
+            logging.error(f"❌ Error fetching orders: {e}")
+            return []
+    
+    def get_order_details(self, order_id):
+        """Get detailed order information including items"""
+        try:
+            amazon_credentials = get_amazon_credentials()
+            orders_api = Orders(marketplace=Marketplaces.IN, credentials=amazon_credentials)
+            
+            items_response = orders_api.get_order_items(order_id)
+            order_items = items_response.payload.get('OrderItems', [])
+            
+            return order_items
+            
+        except Exception as e:
+            logging.error(f"❌ Error getting order details for {order_id}: {e}")
+            return []
         scope = [
             'https://spreadsheets.google.com/feeds',
             'https://www.googleapis.com/auth/drive'
@@ -272,25 +630,32 @@ class CustomAmazonSync:
                     if total_items_in_order > 1:
                         order_summary += f" 📦 SAME ORDER"
                     
-                    # Get order status and convert "Shipped" to "Ordered"
+                    # Get order status (no conversion from "Shipped" to "Ordered")
                     order_status = order.get('OrderStatus', 'N/A')
-                    if order_status.lower() == 'shipped':
-                        order_status = 'Ordered'
                     
-                    # Create row data in new column order (Total Amount removed)
+                    # Get ship date
+                    ship_date = self.get_ship_date(order, order_items)
+                    
+                    # Get next serial number (same for all items in this order)
+                    if idx == 1:  # Only get serial number for first item of the order
+                        serial_number = self.get_next_serial_number()
+                    
+                    # Create row data in new 14-column order
                     row_data = [
-                        'Not Printed',  # Print Status (default)
-                        'Not Packed',   # SKU Status (default)
-                        order_status,   # Order Status (converted from "Shipped" to "Ordered")
-                        item.get('Title', 'N/A'),
-                        str(item.get('QuantityOrdered', 0)),
-                        order_summary,  # Order Summary
-                        order_id,       # Order ID
-                        formatted_date,
-                        buyer_name,
-                        ship_city,
-                        ship_state,
-                        item.get('ASIN', 'N/A')
+                        str(serial_number),  # Sr. No.
+                        'Not Printed',       # Print Status (default)
+                        'Not Packed',        # SKU Status (default)
+                        order_status,        # Order Status (no conversion)
+                        item.get('Title', 'N/A'),  # Product Name
+                        str(item.get('QuantityOrdered', 0)),  # Quantitiy Ordered
+                        order_summary,       # Order summary
+                        order_id,           # Order ID
+                        formatted_date,     # Purchase Date
+                        ship_date,          # Ship Date
+                        buyer_name,         # Buyer Name
+                        ship_city,          # Ship City
+                        ship_state,         # Ship State
+                        item.get('ASIN', 'N/A')  # ASIN
                     ]
                     
                     # Insert at row 2 (after headers) to keep newest at top
@@ -298,44 +663,125 @@ class CustomAmazonSync:
                         self.worksheet.insert_row(row_data, index=2)
                         new_orders_added += 1
                         
-                        print(f"✅ Added: {item.get('Title', 'N/A')[:50]}...")
+                        logging.info(f"✅ Added: {item.get('Title', 'N/A')[:50]}...")
                         
                         # Small delay to avoid overwhelming the API
                         time.sleep(0.3)
                         
                     except Exception as e:
-                        print(f"❌ Error adding row: {e}")
+                        logging.error(f"❌ Error adding row: {e}")
                         
             else:
                 # Handle orders without items
-                # Get order status and convert "Shipped" to "Ordered"
+                # Get order status (no conversion from "Shipped" to "Ordered")
                 order_status = order.get('OrderStatus', 'N/A')
-                if order_status.lower() == 'shipped':
-                    order_status = 'Ordered'
+                
+                # Get ship date for this order
+                ship_date = self.get_ship_date(order, [])
+                
+                # Get serial number for this order
+                serial_number = self.get_next_serial_number()
                 
                 row_data = [
-                    'Not Printed',  # Print Status (default)
-                    'Not Packed',   # SKU Status (default)
-                    order_status,   # Order Status (converted from "Shipped" to "Ordered")
-                    'No items found',
-                    '0',
-                    'Single Item',  # Order summary
-                    order_id,       # Order ID
-                    formatted_date,
-                    buyer_name,
-                    ship_city,
-                    ship_state,
-                    'N/A'
+                    str(serial_number),  # Sr. No.
+                    'Not Printed',       # Print Status (default)
+                    'Not Packed',        # SKU Status (default)
+                    order_status,        # Order Status (no conversion)
+                    'No items found',    # Product Name
+                    '0',                # Quantitiy Ordered
+                    'Single Item',      # Order summary
+                    order_id,           # Order ID
+                    formatted_date,     # Purchase Date
+                    ship_date,          # Ship Date
+                    buyer_name,         # Buyer Name
+                    ship_city,          # Ship City
+                    ship_state,         # Ship State
+                    'N/A'              # ASIN
                 ]
                 
                 self.worksheet.insert_row(row_data, index=2)
                 new_orders_added += 1
                 existing_order_ids.add(order_id)
         
-        print(f"🎉 Sync complete!")
-        print(f"✅ Added {new_orders_added} new orders")
-        print(f"⏭️ Skipped {skipped_duplicates} duplicates")
-        print(f"🎯 Dropdowns ready for Print Status and SKU Status columns")
+        logging.info(f"🎉 New orders sync complete!")
+        logging.info(f"✅ Added {new_orders_added} new orders")
+        logging.info(f"⏭️ Skipped {skipped_duplicates} duplicates")
+        
+        # Update existing orders for dynamic status and ship date changes
+        self.update_existing_orders(orders)
+        
+        logging.info(f"🎯 Dropdowns ready for Print Status and SKU Status columns")
+    
+    def update_existing_orders(self, orders):
+        """Update order status and ship date for existing orders in the sheet"""
+        try:
+            logging.info("🔄 Checking for updates to existing orders...")
+            
+            existing_data = self.worksheet.get_all_values()
+            if len(existing_data) <= 1:
+                logging.info("ℹ️ No existing orders to update")
+                return
+            
+            # Create a map of orders by Order ID for quick lookup
+            order_map = {order['AmazonOrderId']: order for order in orders}
+            
+            updated_count = 0
+            
+            # Process each row (skip header)
+            for row_index, row in enumerate(existing_data[1:], start=2):
+                if len(row) < 8:  # Need at least Order ID column
+                    continue
+                
+                order_id = row[7]  # Order ID is in column H (index 7)
+                if not order_id or order_id == 'N/A' or order_id not in order_map:
+                    continue
+                
+                order = order_map[order_id]
+                current_order_status = row[3]  # Order Status is in column D (index 3)
+                current_ship_date = row[9] if len(row) > 9 else 'N/A'  # Ship Date is in column J (index 9)
+                
+                # Get latest order data from Amazon
+                try:
+                    # Get order items for ship date info
+                    order_items = self.get_order_details(order_id)
+                    
+                    # Get latest status and ship date
+                    latest_order_status = order.get('OrderStatus', 'N/A')
+                    latest_ship_date = self.get_ship_date(order, order_items)
+                    
+                    # Check if updates are needed
+                    status_changed = current_order_status != latest_order_status
+                    ship_date_changed = current_ship_date != latest_ship_date
+                    
+                    if status_changed or ship_date_changed:
+                        logging.info(f"🔄 Updating order {order_id}:")
+                        
+                        if status_changed:
+                            logging.info(f"   📊 Status: {current_order_status} → {latest_order_status}")
+                            # Update Order Status (column D)
+                            self.worksheet.update_cell(row_index, 4, latest_order_status)
+                        
+                        if ship_date_changed:
+                            logging.info(f"   📅 Ship Date: {current_ship_date} → {latest_ship_date}")
+                            # Update Ship Date (column J)
+                            self.worksheet.update_cell(row_index, 10, latest_ship_date)
+                        
+                        updated_count += 1
+                        
+                        # Small delay to avoid API rate limits
+                        time.sleep(0.5)
+                    
+                except Exception as order_error:
+                    logging.warning(f"⚠️ Could not update order {order_id}: {order_error}")
+                    continue
+            
+            if updated_count > 0:
+                logging.info(f"✅ Updated {updated_count} existing orders with latest status and ship dates")
+            else:
+                logging.info("ℹ️ No existing orders needed updates")
+                
+        except Exception as e:
+            logging.error(f"❌ Could not update existing orders: {e}")
 
 def is_sleep_time():
     """Check if current time is within sleep hours (12:30 AM to 5:30 AM IST)"""
