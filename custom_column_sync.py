@@ -325,26 +325,34 @@ class CustomAmazonSync:
             return 193  # Default to 193 on error
     
     def get_existing_unique_ids(self):
-        """Get existing order IDs to prevent duplicates"""
+        """Get existing order IDs to prevent duplicates - STANDARDIZED VERSION"""
         try:
             existing_data = self.worksheet.get_all_values()
             if len(existing_data) <= 1:
-                return set()
+                return set(), set()
             
-            # Get Order IDs from column H (index 7) - Order ID column position
+            # STANDARDIZED: Order ID is ALWAYS in column 8 (index 7) in 14-column layout
             order_ids = set()
+            order_item_combinations = set()
+            
             for row in existing_data[1:]:  # Skip header row
                 if len(row) > 7 and row[7]:  # Ensure row has Order ID column and it's not empty
                     order_id = row[7].strip()  # Remove any whitespace
                     if order_id and order_id != 'N/A':  # Only add valid Order IDs
                         order_ids.add(order_id)
+                        
+                        # Also track order_id + ASIN combinations for item-level duplicate prevention
+                        if len(row) > 13 and row[13]:  # ASIN in column 14 (index 13)
+                            asin = row[13].strip()
+                            if asin and asin != 'N/A':
+                                order_item_combinations.add(f"{order_id}:{asin}")
             
-            print(f"📊 Found {len(order_ids)} existing Order IDs in sheet")
-            return order_ids
+            print(f"📊 Found {len(order_ids)} existing Order IDs and {len(order_item_combinations)} order-item combinations")
+            return order_ids, order_item_combinations
             
         except Exception as e:
             print(f"⚠️ Could not read existing data: {e}")
-            return set()
+            return set(), set()
     
     def get_recent_orders(self, hours_back=6):
         """Get orders from last X hours (default 6 hours to handle sleep gaps)"""
@@ -425,88 +433,14 @@ class CustomAmazonSync:
             print(f"⚠️ Error getting ship date: {e}")
             return 'N/A'
     
-    def update_existing_orders(self):
-        """Update order status and ship date for existing orders in the sheet"""
-        try:
-            print("🔄 Checking for updates to existing orders...")
-            
-            existing_data = self.worksheet.get_all_values()
-            if len(existing_data) <= 1:
-                print("ℹ️ No existing orders to update")
-                return
-            
-            updated_count = 0
-            
-            # Process each row (skip header)
-            for row_index, row in enumerate(existing_data[1:], start=2):
-                if len(row) < 8:  # Need at least Order ID column (index 7, so need 8 elements)
-                    continue
-                
-                order_id = row[7].strip() if row[7] else ''  # Order ID is in column H (index 7)
-                if not order_id or order_id == 'N/A':
-                    continue
-                
-                current_order_status = row[3]  # Order Status is in column D (index 3)
-                current_ship_date = row[9] if len(row) > 9 else 'N/A'  # Ship Date is in column J (index 9)
-                
-                # Get latest order data from Amazon
-                try:
-                    amazon_credentials = get_amazon_credentials()
-                    orders_api = Orders(marketplace=Marketplaces.IN, credentials=amazon_credentials)
-                    
-                    # Get order details
-                    order_response = orders_api.get_order(order_id)
-                    order_data = order_response.payload
-                    
-                    # Get order items for ship date info
-                    order_items = self.get_order_details(order_id)
-                    
-                    # Get latest status and ship date
-                    latest_order_status = order_data.get('OrderStatus', 'N/A')
-                    latest_ship_date = self.get_ship_date(order_data, order_items)
-                    
-                    # Check if updates are needed
-                    status_changed = current_order_status != latest_order_status
-                    ship_date_changed = current_ship_date != latest_ship_date
-                    
-                    if status_changed or ship_date_changed:
-                        print(f"🔄 Updating order {order_id}:")
-                        
-                        if status_changed:
-                            print(f"   📊 Status: {current_order_status} → {latest_order_status}")
-                            # Update Order Status (column D)
-                            self.worksheet.update_cell(row_index, 4, latest_order_status)
-                        
-                        if ship_date_changed:
-                            print(f"   📅 Ship Date: {current_ship_date} → {latest_ship_date}")
-                            # Update Ship Date (column J)
-                            self.worksheet.update_cell(row_index, 10, latest_ship_date)
-                        
-                        updated_count += 1
-                        
-                        # Small delay to avoid API rate limits
-                        time.sleep(0.5)
-                    
-                except Exception as order_error:
-                    print(f"⚠️ Could not update order {order_id}: {order_error}")
-                    continue
-            
-            if updated_count > 0:
-                print(f"✅ Updated {updated_count} existing orders")
-            else:
-                print("ℹ️ No existing orders needed updates")
-                
-        except Exception as e:
-            print(f"❌ Error updating existing orders: {e}")
-    
     def sync_orders_to_sheet(self, orders):
-        """Add new orders to Google Sheet with custom formatting"""
+        """Add new orders to Google Sheet with STANDARDIZED 14-column layout and enhanced duplicate prevention"""
         if not orders:
             print("ℹ️ No orders to sync")
             return
             
-        # Get existing order IDs to prevent duplicates
-        existing_order_ids = self.get_existing_unique_ids()
+        # ENHANCED: Get both order IDs and order-item combinations to prevent duplicates
+        existing_order_ids, existing_order_item_combinations = self.get_existing_unique_ids()
         
         new_orders_added = 0
         skipped_duplicates = 0
@@ -519,9 +453,6 @@ class CustomAmazonSync:
                 print(f"⏭️ Skipping duplicate order: {order_id}")
                 skipped_duplicates += 1
                 continue
-                
-            # Add to existing set immediately to prevent duplicates in this batch
-            existing_order_ids.add(order_id)
                 
             print(f"📋 Processing new order: {order_id}")
             
@@ -546,89 +477,215 @@ class CustomAmazonSync:
             # Get next serial number for this order (same for all items in the order)
             serial_number = self.get_next_serial_number()
             
+            # ENHANCED: Batch processing to prevent partial order insertion
+            rows_to_insert = []
+            
             if order_items:
                 total_items_in_order = len(order_items)
                 
                 for idx, item in enumerate(order_items, 1):
+                    asin = item.get('ASIN', 'N/A')
+                    
+                    # ENHANCED: Check for item-level duplicates
+                    order_item_key = f"{order_id}:{asin}"
+                    if order_item_key in existing_order_item_combinations:
+                        print(f"⏭️ Skipping duplicate order item: {order_id} - {asin}")
+                        continue
+                    
+                    # Add to existing set to prevent duplicates in this batch
+                    existing_order_item_combinations.add(order_item_key)
+                    
                     # Create order summary info
                     order_summary = f"Item {idx} of {total_items_in_order}"
                     if total_items_in_order > 1:
                         order_summary += f" 📦 SAME ORDER"
                     
-                    # Get order status (no more conversion from "Shipped" to "Ordered")
+                    # Get order status (no conversion from "Shipped" to "Ordered")
                     order_status = order.get('OrderStatus', 'N/A')
                     
-                    # Create row data in new column order (with Sr. No. and Ship Date)
+                    # STANDARDIZED: Create row data in exact 14-column layout
                     row_data = [
-                        str(serial_number), # Sr. No. (same for all items in order)
-                        'Not Printed',  # Print Status (default)
-                        'Not Packed',   # SKU Status (default)
-                        order_status,   # Order Status (no conversion)
-                        item.get('Title', 'N/A'),
-                        str(item.get('QuantityOrdered', 0)),
-                        order_summary,  # Order Summary
-                        order_id,       # Order ID
-                        formatted_date,
-                        ship_date,      # Ship Date
-                        buyer_name,
-                        ship_city,
-                        ship_state,
-                        item.get('ASIN', 'N/A')
+                        str(serial_number),                    # 1. Serial Number
+                        'Not Printed',                         # 2. Print Status (default)
+                        'Not Packed',                          # 3. SKU Status (default)
+                        order_status,                          # 4. Order Status
+                        item.get('Title', 'N/A'),            # 5. Product Name
+                        str(item.get('QuantityOrdered', 0)),  # 6. Order Quantity
+                        order_summary,                         # 7. Order Summary
+                        order_id,                             # 8. Order ID
+                        formatted_date,                       # 9. Purchase Date
+                        ship_date,                            # 10. Ship Date
+                        buyer_name,                           # 11. Buyer Name
+                        ship_city,                            # 12. Ship City
+                        ship_state,                           # 13. Ship State
+                        asin                                  # 14. ASIN
                     ]
                     
-                    # Insert at row 2 (after headers) to keep newest at top
-                    try:
-                        self.worksheet.insert_row(row_data, index=2)
-                        new_orders_added += 1
-                        
-                        print(f"✅ Added: {item.get('Title', 'N/A')[:50]}...")
-                        
-                        # Small delay to avoid overwhelming the API
-                        time.sleep(0.3)
-                        
-                    except Exception as e:
-                        print(f"❌ Error adding row: {e}")
-                        
+                    rows_to_insert.append(row_data)
+                    
             else:
                 # Handle orders without items
-                # Get order status (no more conversion from "Shipped" to "Ordered")
                 order_status = order.get('OrderStatus', 'N/A')
                 
-                # Get ship date for this order
-                ship_date = self.get_ship_date(order, [])
-                
-                # Get serial number for this order
-                serial_number = self.get_next_serial_number()
-                
+                # STANDARDIZED: Create row data in exact 14-column layout for orders without items
                 row_data = [
-                    str(serial_number), # Sr. No.
-                    'Not Printed',  # Print Status (default)
-                    'Not Packed',   # SKU Status (default)
-                    order_status,   # Order Status (no conversion)
-                    'No items found',
-                    '0',
-                    'Single Item',  # Order summary
-                    order_id,       # Order ID
-                    formatted_date,
-                    ship_date,      # Ship Date
-                    buyer_name,
-                    ship_city,
-                    ship_state,
-                    'N/A'
+                    str(serial_number),     # 1. Serial Number
+                    'Not Printed',          # 2. Print Status (default)
+                    'Not Packed',           # 3. SKU Status (default)
+                    order_status,           # 4. Order Status
+                    'No items found',       # 5. Product Name
+                    '0',                    # 6. Order Quantity
+                    'Single Item',          # 7. Order Summary
+                    order_id,               # 8. Order ID
+                    formatted_date,         # 9. Purchase Date
+                    ship_date,              # 10. Ship Date
+                    buyer_name,             # 11. Buyer Name
+                    ship_city,              # 12. Ship City
+                    ship_state,             # 13. Ship State
+                    'N/A'                   # 14. ASIN
                 ]
                 
-                self.worksheet.insert_row(row_data, index=2)
-                new_orders_added += 1
-                existing_order_ids.add(order_id)
+                rows_to_insert.append(row_data)
+            
+            # ENHANCED: Batch insert all rows for this order atomically
+            for row_data in rows_to_insert:
+                try:
+                    # Insert at row 2 (after headers) to keep newest at top
+                    self.worksheet.insert_row(row_data, index=2)
+                    new_orders_added += 1
+                    
+                    print(f"✅ Added: {row_data[4][:50]}...")  # Product name is at index 4
+                    
+                    # Small delay to avoid overwhelming the API
+                    time.sleep(0.3)
+                    
+                except Exception as e:
+                    print(f"❌ Error adding row: {e}")
+                    break  # Stop processing this order if any row fails
+            
+            # Mark this order as processed
+            existing_order_ids.add(order_id)
         
         print(f"🎉 New orders sync complete!")
         print(f"✅ Added {new_orders_added} new orders")
         print(f"⏭️ Skipped {skipped_duplicates} duplicates")
         
-        # Update existing orders for dynamic status and ship date changes
-        self.update_existing_orders()
+        # ENHANCED: Update existing orders for dynamic status and ship date changes (last 6 hours only)
+        self.update_existing_orders_for_last_6_hours()
         
         print(f"🎯 Dropdowns ready for Print Status and SKU Status columns")
+
+    def update_existing_orders_for_last_6_hours(self):
+        """ENHANCED: Update order status and ship date for existing orders from last 6 hours only"""
+        try:
+            print("🔄 Checking for dynamic updates to existing orders (last 6 hours)...")
+            
+            existing_data = self.worksheet.get_all_values()
+            if len(existing_data) <= 1:
+                print("ℹ️ No existing orders to update")
+                return
+            
+            # Get recent orders from Amazon (last 6 hours)
+            recent_orders = self.get_recent_orders(hours_back=6)
+            if not recent_orders:
+                print("ℹ️ No recent orders from Amazon to check for updates")
+                return
+            
+            # Create a map of orders by Order ID for quick lookup
+            order_map = {order['AmazonOrderId']: order for order in recent_orders}
+            
+            updated_count = 0
+            cutoff_time = datetime.now() - timedelta(hours=6)
+            
+            # Process each row (skip header)
+            for row_index, row in enumerate(existing_data[1:], start=2):
+                if len(row) < 8:  # Need at least Order ID column
+                    continue
+                
+                order_id = row[7]  # Order ID is in column H (index 7)
+                if not order_id or order_id == 'N/A' or order_id not in order_map:
+                    continue
+                
+                # ENHANCED: Only process orders from last 6 hours based on purchase date
+                try:
+                    purchase_date_str = row[8]  # Purchase Date is in column I (index 8)
+                    if purchase_date_str and purchase_date_str != 'N/A':
+                        # Parse the formatted date back to datetime for comparison
+                        purchase_date = datetime.strptime(purchase_date_str, '%b %d, %Y %I:%M %p')
+                        if purchase_date < cutoff_time:
+                            continue  # Skip orders older than 6 hours
+                except (ValueError, IndexError):
+                    # If we can't parse the date, skip this order
+                    continue
+                
+                order = order_map[order_id]
+                current_order_status = row[3]  # Order Status is in column D (index 3)
+                current_ship_date = row[9] if len(row) > 9 else 'N/A'  # Ship Date is in column J (index 9)
+                
+                # Get latest order data from Amazon
+                try:
+                    # Get order items for ship date info
+                    order_items = self.get_order_details(order_id)
+                    
+                    # Get latest status and ship date
+                    latest_order_status = order.get('OrderStatus', 'N/A')
+                    latest_ship_date = self.get_ship_date(order, order_items)
+                    
+                    # ENHANCED: Check for status transitions and ship date changes
+                    status_changed = current_order_status != latest_order_status
+                    ship_date_changed = current_ship_date != latest_ship_date
+                    
+                    # Log specific status transitions
+                    if status_changed:
+                        transition = f"{current_order_status} → {latest_order_status}"
+                        if self.is_important_status_transition(current_order_status, latest_order_status):
+                            print(f"🔄 Important status transition for {order_id}: {transition}")
+                        else:
+                            print(f"🔄 Status change for {order_id}: {transition}")
+                    
+                    if status_changed or ship_date_changed:
+                        print(f"🔄 Updating order {order_id} (from last 6 hours):")
+                        
+                        if status_changed:
+                            print(f"   📊 Status: {current_order_status} → {latest_order_status}")
+                            # Update Order Status (column D)
+                            self.worksheet.update_cell(row_index, 4, latest_order_status)
+                        
+                        if ship_date_changed:
+                            print(f"   📅 Ship Date: {current_ship_date} → {latest_ship_date}")
+                            # Update Ship Date (column J)
+                            self.worksheet.update_cell(row_index, 10, latest_ship_date)
+                        
+                        updated_count += 1
+                        
+                        # Small delay to avoid API rate limits
+                        time.sleep(0.5)
+                    
+                except Exception as order_error:
+                    print(f"⚠️ Could not update order {order_id}: {order_error}")
+                    continue
+            
+            if updated_count > 0:
+                print(f"✅ Updated {updated_count} existing orders from last 6 hours with latest status and ship dates")
+            else:
+                print("ℹ️ No existing orders from last 6 hours needed updates")
+                
+        except Exception as e:
+            print(f"❌ Could not update existing orders: {e}")
+    
+    def is_important_status_transition(self, old_status, new_status):
+        """Check if this is an important status transition worth highlighting"""
+        important_transitions = [
+            ('Pending', 'Ordered'),
+            ('Pending', 'Shipped'),
+            ('Pending', 'Canceled'),
+            ('Ordered', 'Shipped'),
+            ('Ordered', 'Canceled'),
+            ('Unshipped', 'Shipped'),
+            ('PartiallyShipped', 'Shipped'),
+        ]
+        
+        return (old_status, new_status) in important_transitions
 
 def is_sleep_time():
     """Check if current time is within sleep hours (12:30 AM to 5:30 AM IST)"""

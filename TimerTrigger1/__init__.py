@@ -356,24 +356,37 @@ class CustomAmazonSync:
         except Exception as e:
             logging.warning(f"⚠️ Error getting ship date: {e}")
             return 'N/A'
-            
+    
     def get_existing_unique_ids(self):
-        """Get existing order IDs to prevent duplicates"""
+        """Get existing order IDs to prevent duplicates - STANDARDIZED VERSION"""
         try:
             existing_data = self.worksheet.get_all_values()
             if len(existing_data) <= 1:
-                return set()
+                return set(), set()
             
-            # Get Order IDs from column H (index 7) - Order ID column position
-            order_ids = {row[7] for row in existing_data[1:] if len(row) > 7 and row[7]}
+            # STANDARDIZED: Order ID is ALWAYS in column 8 (index 7) in 14-column layout
+            order_ids = set()
+            order_item_combinations = set()
             
-            logging.info(f"📊 Found {len(order_ids)} existing Order IDs in sheet")
-            return order_ids
+            for row in existing_data[1:]:  # Skip header row
+                if len(row) > 7 and row[7]:  # Ensure row has Order ID column and it's not empty
+                    order_id = row[7].strip()  # Remove any whitespace
+                    if order_id and order_id != 'N/A':  # Only add valid Order IDs
+                        order_ids.add(order_id)
+                        
+                        # Also track order_id + ASIN combinations for item-level duplicate prevention
+                        if len(row) > 13 and row[13]:  # ASIN in column 14 (index 13)
+                            asin = row[13].strip()
+                            if asin and asin != 'N/A':
+                                order_item_combinations.add(f"{order_id}:{asin}")
+            
+            logging.info(f"📊 Found {len(order_ids)} existing Order IDs and {len(order_item_combinations)} order-item combinations")
+            return order_ids, order_item_combinations
             
         except Exception as e:
-            logging.warning(f"⚠️ Could not read existing data: {e}")
-            return set()
-    
+            logging.error(f"⚠️ Could not read existing data: {e}")
+            return set(), set()
+            
     def get_recent_orders(self, hours_back=6):
         """Get orders from last X hours (default 6 hours for Azure Function)"""
         try:
@@ -406,188 +419,15 @@ class CustomAmazonSync:
         except Exception as e:
             logging.error(f"❌ Error getting order details for {order_id}: {e}")
             return []
-        scope = [
-            'https://spreadsheets.google.com/feeds',
-            'https://www.googleapis.com/auth/drive'
-        ]
-        
-        creds = Credentials.from_service_account_file('google_credentials.json', scopes=scope)
-        self.client = gspread.authorize(creds)
-        self.spreadsheet = self.client.open_by_url(self.sheet_url)
-        
-        # Get or create Orders worksheet
-        try:
-            self.worksheet = self.spreadsheet.worksheet('Orders')
-        except gspread.WorksheetNotFound:
-            self.worksheet = self.spreadsheet.add_worksheet(title='Orders', rows=1000, cols=12)
-            
-            # Add headers in exact sequence requested (Total Amount removed)
-            headers = [
-                'Print Status',      # Dropdown: Not Printed/Printed
-                'SKU Status',       # Dropdown: Not Packed/Box Packed
-                'Order Status',
-                'Product Name',
-                'Quantity Ordered',
-                'Order Summary',    # Shows "Item 1 of 3" etc.
-                'Order ID',
-                'Purchase Date',    # Formatted date
-                'Buyer Name',
-                'Ship City',
-                'Ship State',
-                'ASIN'
-            ]
-            self.worksheet.append_row(headers)
-            
-            # Setup dropdown validations
-            self.setup_dropdown_validations()
-            
-        print(f"✅ Connected to Google Sheet: {self.spreadsheet.title}")
-        
-    def setup_dropdown_validations(self):
-        """Setup dropdown menus for Print Status and SKU Status columns"""
-        try:
-            # Print Status dropdown (Column A)
-            print_status_rule = {
-                "requests": [
-                    {
-                        "setDataValidation": {
-                            "range": {
-                                "sheetId": self.worksheet.id,
-                                "startRowIndex": 1,  # Start from row 2 (after header)
-                                "endRowIndex": 1000,  # Apply to 1000 rows
-                                "startColumnIndex": 0,  # Column A
-                                "endColumnIndex": 1
-                            },
-                            "rule": {
-                                "condition": {
-                                    "type": "ONE_OF_LIST",
-                                    "values": [
-                                        {"userEnteredValue": "Not Printed"},
-                                        {"userEnteredValue": "Printed"}
-                                    ]
-                                },
-                                "showCustomUi": True,
-                                "strict": True
-                            }
-                        }
-                    }
-                ]
-            }
-            
-            # SKU Status dropdown (Column B)
-            sku_status_rule = {
-                "requests": [
-                    {
-                        "setDataValidation": {
-                            "range": {
-                                "sheetId": self.worksheet.id,
-                                "startRowIndex": 1,  # Start from row 2 (after header)
-                                "endRowIndex": 1000,  # Apply to 1000 rows
-                                "startColumnIndex": 1,  # Column B
-                                "endColumnIndex": 2
-                            },
-                            "rule": {
-                                "condition": {
-                                    "type": "ONE_OF_LIST",
-                                    "values": [
-                                        {"userEnteredValue": "Not Packed"},
-                                        {"userEnteredValue": "Box Packed"}
-                                    ]
-                                },
-                                "showCustomUi": True,
-                                "strict": True
-                            }
-                        }
-                    }
-                ]
-            }
-            
-            # Apply validation rules
-            self.spreadsheet.batch_update(print_status_rule)
-            self.spreadsheet.batch_update(sku_status_rule)
-            
-            print("✅ Dropdown validations setup complete")
-            
-        except Exception as e:
-            print(f"⚠️ Could not setup dropdowns: {e}")
-            print("💡 You can manually add dropdowns in Google Sheets")
-    
-    def format_purchase_date(self, date_string):
-        """Convert Amazon date format to readable format"""
-        try:
-            # Parse Amazon date: 2025-07-30T18:13:35Z
-            dt = datetime.fromisoformat(date_string.replace('Z', '+00:00'))
-            
-            # Convert to local time (assuming IST)
-            # Add 5:30 hours for IST
-            local_dt = dt.replace(tzinfo=None) + timedelta(hours=5, minutes=30)
-            
-            # Format as: Jul 30, 2025 11:43 PM
-            formatted = local_dt.strftime('%b %d, %Y %I:%M %p')
-            return formatted
-            
-        except Exception as e:
-            print(f"⚠️ Date formatting error: {e}")
-            return date_string
-    
-    def get_existing_unique_ids(self):
-        """Get existing order IDs to prevent duplicates"""
-        try:
-            existing_data = self.worksheet.get_all_values()
-            if len(existing_data) <= 1:
-                return set()
-            
-            # Get Order IDs from column G (index 6) - Order ID column position
-            order_ids = {row[6] for row in existing_data[1:] if len(row) > 6 and row[6]}
-            
-            print(f"📊 Found {len(order_ids)} existing Order IDs in sheet")
-            return order_ids
-            
-        except Exception as e:
-            print(f"⚠️ Could not read existing data: {e}")
-            return set()
-    
-    def get_recent_orders(self, hours_back=6):
-        """Get orders from last X hours (default 6 hours to handle sleep gaps)"""
-        try:
-            amazon_credentials = get_amazon_credentials()
-            orders_api = Orders(marketplace=Marketplaces.IN, credentials=amazon_credentials)
-            
-            created_after = (datetime.now() - timedelta(hours=hours_back)).isoformat()
-            response = orders_api.get_orders(CreatedAfter=created_after, MaxResultsPerPage=50)
-            
-            orders = response.payload.get('Orders', [])
-            print(f"📦 Found {len(orders)} orders from last {hours_back} hours")
-            
-            return orders
-            
-        except Exception as e:
-            print(f"❌ Error fetching orders: {e}")
-            return []
-    
-    def get_order_details(self, order_id):
-        """Get detailed order information including items"""
-        try:
-            amazon_credentials = get_amazon_credentials()
-            orders_api = Orders(marketplace=Marketplaces.IN, credentials=amazon_credentials)
-            
-            items_response = orders_api.get_order_items(order_id)
-            order_items = items_response.payload.get('OrderItems', [])
-            
-            return order_items
-            
-        except Exception as e:
-            print(f"❌ Error getting order details for {order_id}: {e}")
-            return []
     
     def sync_orders_to_sheet(self, orders):
-        """Add new orders to Google Sheet with custom formatting"""
+        """Add new orders to Google Sheet with enhanced duplicate prevention"""
         if not orders:
-            print("ℹ️ No orders to sync")
+            logging.info("ℹ️ No orders to sync")
             return
             
-        # Get existing order IDs to prevent duplicates
-        existing_order_ids = self.get_existing_unique_ids()
+        # ENHANCED: Get both order IDs and order-item combinations to prevent duplicates
+        existing_order_ids, existing_order_item_combinations = self.get_existing_unique_ids()
         
         new_orders_added = 0
         skipped_duplicates = 0
@@ -597,14 +437,11 @@ class CustomAmazonSync:
             
             # Skip if order already exists
             if order_id in existing_order_ids:
-                print(f"⏭️ Skipping duplicate order: {order_id}")
+                logging.info(f"⏭️ Skipping duplicate order: {order_id}")
                 skipped_duplicates += 1
                 continue
                 
-            # Add to existing set immediately to prevent duplicates in this batch
-            existing_order_ids.add(order_id)
-                
-            print(f"📋 Processing new order: {order_id}")
+            logging.info(f"📋 Processing new order: {order_id}")
             
             # Get order items
             order_items = self.get_order_details(order_id)
@@ -621,10 +458,30 @@ class CustomAmazonSync:
             # Format purchase date
             formatted_date = self.format_purchase_date(order.get('PurchaseDate', ''))
             
+            # Get ship date
+            ship_date = self.get_ship_date(order, order_items)
+            
+            # Get next serial number for this order (same for all items in the order)
+            serial_number = self.get_next_serial_number()
+            
+            # ENHANCED: Batch processing to prevent partial order insertion
+            rows_to_insert = []
+            
             if order_items:
                 total_items_in_order = len(order_items)
                 
                 for idx, item in enumerate(order_items, 1):
+                    asin = item.get('ASIN', 'N/A')
+                    
+                    # ENHANCED: Check for item-level duplicates
+                    order_item_key = f"{order_id}:{asin}"
+                    if order_item_key in existing_order_item_combinations:
+                        logging.info(f"⏭️ Skipping duplicate order item: {order_id} - {asin}")
+                        continue
+                    
+                    # Add to existing set to prevent duplicates in this batch
+                    existing_order_item_combinations.add(order_item_key)
+                    
                     # Create order summary info
                     order_summary = f"Item {idx} of {total_items_in_order}"
                     if total_items_in_order > 1:
@@ -633,99 +490,93 @@ class CustomAmazonSync:
                     # Get order status (no conversion from "Shipped" to "Ordered")
                     order_status = order.get('OrderStatus', 'N/A')
                     
-                    # Get ship date
-                    ship_date = self.get_ship_date(order, order_items)
-                    
-                    # Get next serial number (same for all items in this order)
-                    if idx == 1:  # Only get serial number for first item of the order
-                        serial_number = self.get_next_serial_number()
-                    
-                    # Create row data in new 14-column order
+                    # STANDARDIZED: Create row data in exact 14-column layout
                     row_data = [
-                        str(serial_number),  # Sr. No.
-                        'Not Printed',       # Print Status (default)
-                        'Not Packed',        # SKU Status (default)
-                        order_status,        # Order Status (no conversion)
-                        item.get('Title', 'N/A'),  # Product Name
-                        str(item.get('QuantityOrdered', 0)),  # Quantitiy Ordered
-                        order_summary,       # Order summary
-                        order_id,           # Order ID
-                        formatted_date,     # Purchase Date
-                        ship_date,          # Ship Date
-                        buyer_name,         # Buyer Name
-                        ship_city,          # Ship City
-                        ship_state,         # Ship State
-                        item.get('ASIN', 'N/A')  # ASIN
+                        str(serial_number),                    # 1. Serial Number
+                        'Not Printed',                         # 2. Print Status (default)
+                        'Not Packed',                          # 3. SKU Status (default)
+                        order_status,                          # 4. Order Status
+                        item.get('Title', 'N/A'),            # 5. Product Name
+                        str(item.get('QuantityOrdered', 0)),  # 6. Order Quantity
+                        order_summary,                         # 7. Order Summary
+                        order_id,                             # 8. Order ID
+                        formatted_date,                       # 9. Purchase Date
+                        ship_date,                            # 10. Ship Date
+                        buyer_name,                           # 11. Buyer Name
+                        ship_city,                            # 12. Ship City
+                        ship_state,                           # 13. Ship State
+                        asin                                  # 14. ASIN
                     ]
                     
-                    # Insert at row 2 (after headers) to keep newest at top
-                    try:
-                        self.worksheet.insert_row(row_data, index=2)
-                        new_orders_added += 1
-                        
-                        logging.info(f"✅ Added: {item.get('Title', 'N/A')[:50]}...")
-                        
-                        # Small delay to avoid overwhelming the API
-                        time.sleep(0.3)
-                        
-                    except Exception as e:
-                        logging.error(f"❌ Error adding row: {e}")
-                        
+                    rows_to_insert.append(row_data)
+                    
             else:
                 # Handle orders without items
-                # Get order status (no conversion from "Shipped" to "Ordered")
                 order_status = order.get('OrderStatus', 'N/A')
                 
-                # Get ship date for this order
-                ship_date = self.get_ship_date(order, [])
-                
-                # Get serial number for this order
-                serial_number = self.get_next_serial_number()
-                
+                # STANDARDIZED: Create row data in exact 14-column layout for orders without items
                 row_data = [
-                    str(serial_number),  # Sr. No.
-                    'Not Printed',       # Print Status (default)
-                    'Not Packed',        # SKU Status (default)
-                    order_status,        # Order Status (no conversion)
-                    'No items found',    # Product Name
-                    '0',                # Quantitiy Ordered
-                    'Single Item',      # Order summary
-                    order_id,           # Order ID
-                    formatted_date,     # Purchase Date
-                    ship_date,          # Ship Date
-                    buyer_name,         # Buyer Name
-                    ship_city,          # Ship City
-                    ship_state,         # Ship State
-                    'N/A'              # ASIN
+                    str(serial_number),     # 1. Serial Number
+                    'Not Printed',          # 2. Print Status (default)
+                    'Not Packed',           # 3. SKU Status (default)
+                    order_status,           # 4. Order Status
+                    'No items found',       # 5. Product Name
+                    '0',                    # 6. Order Quantity
+                    'Single Item',          # 7. Order Summary
+                    order_id,               # 8. Order ID
+                    formatted_date,         # 9. Purchase Date
+                    ship_date,              # 10. Ship Date
+                    buyer_name,             # 11. Buyer Name
+                    ship_city,              # 12. Ship City
+                    ship_state,             # 13. Ship State
+                    'N/A'                   # 14. ASIN
                 ]
                 
-                self.worksheet.insert_row(row_data, index=2)
-                new_orders_added += 1
-                existing_order_ids.add(order_id)
+                rows_to_insert.append(row_data)
+            
+            # ENHANCED: Batch insert all rows for this order atomically
+            for row_data in rows_to_insert:
+                try:
+                    # Insert at row 2 (after headers) to keep newest at top
+                    self.worksheet.insert_row(row_data, index=2)
+                    new_orders_added += 1
+                    
+                    logging.info(f"✅ Added: {row_data[4][:50]}...")  # Product name is at index 4
+                    
+                    # Small delay to avoid overwhelming the API
+                    time.sleep(0.3)
+                    
+                except Exception as e:
+                    logging.error(f"❌ Error adding row: {e}")
+                    break  # Stop processing this order if any row fails
+            
+            # Mark this order as processed
+            existing_order_ids.add(order_id)
         
         logging.info(f"🎉 New orders sync complete!")
         logging.info(f"✅ Added {new_orders_added} new orders")
         logging.info(f"⏭️ Skipped {skipped_duplicates} duplicates")
         
-        # Update existing orders for dynamic status and ship date changes
-        self.update_existing_orders(orders)
+        # ENHANCED: Update existing orders for dynamic status and ship date changes
+        self.update_existing_orders_for_last_6_hours(orders)
         
         logging.info(f"🎯 Dropdowns ready for Print Status and SKU Status columns")
     
-    def update_existing_orders(self, orders):
-        """Update order status and ship date for existing orders in the sheet"""
+    def update_existing_orders_for_last_6_hours(self, orders):
+        """ENHANCED: Update order status and ship date for existing orders from last 6 hours only"""
         try:
-            logging.info("🔄 Checking for updates to existing orders...")
+            logging.info("🔄 Checking for dynamic updates to existing orders (last 6 hours)...")
             
             existing_data = self.worksheet.get_all_values()
             if len(existing_data) <= 1:
                 logging.info("ℹ️ No existing orders to update")
                 return
             
-            # Create a map of orders by Order ID for quick lookup
+            # Create a map of orders by Order ID for quick lookup (only orders from last 6 hours)
             order_map = {order['AmazonOrderId']: order for order in orders}
             
             updated_count = 0
+            cutoff_time = datetime.now() - timedelta(hours=6)
             
             # Process each row (skip header)
             for row_index, row in enumerate(existing_data[1:], start=2):
@@ -734,6 +585,18 @@ class CustomAmazonSync:
                 
                 order_id = row[7]  # Order ID is in column H (index 7)
                 if not order_id or order_id == 'N/A' or order_id not in order_map:
+                    continue
+                
+                # ENHANCED: Only process orders from last 6 hours based on purchase date
+                try:
+                    purchase_date_str = row[8]  # Purchase Date is in column I (index 8)
+                    if purchase_date_str and purchase_date_str != 'N/A':
+                        # Parse the formatted date back to datetime for comparison
+                        purchase_date = datetime.strptime(purchase_date_str, '%b %d, %Y %I:%M %p')
+                        if purchase_date < cutoff_time:
+                            continue  # Skip orders older than 6 hours
+                except (ValueError, IndexError):
+                    # If we can't parse the date, skip this order
                     continue
                 
                 order = order_map[order_id]
@@ -749,12 +612,20 @@ class CustomAmazonSync:
                     latest_order_status = order.get('OrderStatus', 'N/A')
                     latest_ship_date = self.get_ship_date(order, order_items)
                     
-                    # Check if updates are needed
+                    # ENHANCED: Check for status transitions and ship date changes
                     status_changed = current_order_status != latest_order_status
                     ship_date_changed = current_ship_date != latest_ship_date
                     
+                    # Log specific status transitions
+                    if status_changed:
+                        transition = f"{current_order_status} → {latest_order_status}"
+                        if self.is_important_status_transition(current_order_status, latest_order_status):
+                            logging.info(f"🔄 Important status transition for {order_id}: {transition}")
+                        else:
+                            logging.info(f"🔄 Status change for {order_id}: {transition}")
+                    
                     if status_changed or ship_date_changed:
-                        logging.info(f"🔄 Updating order {order_id}:")
+                        logging.info(f"🔄 Updating order {order_id} (from last 6 hours):")
                         
                         if status_changed:
                             logging.info(f"   📊 Status: {current_order_status} → {latest_order_status}")
@@ -776,12 +647,26 @@ class CustomAmazonSync:
                     continue
             
             if updated_count > 0:
-                logging.info(f"✅ Updated {updated_count} existing orders with latest status and ship dates")
+                logging.info(f"✅ Updated {updated_count} existing orders from last 6 hours with latest status and ship dates")
             else:
-                logging.info("ℹ️ No existing orders needed updates")
+                logging.info("ℹ️ No existing orders from last 6 hours needed updates")
                 
         except Exception as e:
             logging.error(f"❌ Could not update existing orders: {e}")
+    
+    def is_important_status_transition(self, old_status, new_status):
+        """Check if this is an important status transition worth highlighting"""
+        important_transitions = [
+            ('Pending', 'Ordered'),
+            ('Pending', 'Shipped'),
+            ('Pending', 'Canceled'),
+            ('Ordered', 'Shipped'),
+            ('Ordered', 'Canceled'),
+            ('Unshipped', 'Shipped'),
+            ('PartiallyShipped', 'Shipped'),
+        ]
+        
+        return (old_status, new_status) in important_transitions
 
 def is_sleep_time():
     """Check if current time is within sleep hours (12:30 AM to 5:30 AM IST)"""
