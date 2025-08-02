@@ -576,7 +576,15 @@ class CustomAmazonSync:
         print(f"🎯 Dropdowns ready for Print Status and SKU Status columns")
 
     def update_existing_orders_for_last_6_hours(self):
-        """ENHANCED: Update order status and ship date for existing orders from last 6 hours only"""
+        """ENHANCED: Update order status, ship date, ship city, and ship state for existing orders from last 6 hours only
+        
+        Features:
+        - Updates Order Status and Ship Date for all status changes
+        - Updates Ship City and Ship State when orders leave Pending status
+        - Updates Ship City and Ship State when current values are N/A and new data is available
+        - Only processes orders from last 6 hours for efficiency
+        - Comprehensive logging for all field updates
+        """
         try:
             print("🔄 Checking for dynamic updates to existing orders (last 6 hours)...")
             
@@ -621,6 +629,8 @@ class CustomAmazonSync:
                 order = order_map[order_id]
                 current_order_status = row[3]  # Order Status is in column D (index 3)
                 current_ship_date = row[9] if len(row) > 9 else 'N/A'  # Ship Date is in column J (index 9)
+                current_ship_city = row[11] if len(row) > 11 else 'N/A'  # Ship City is in column L (index 11)
+                current_ship_state = row[12] if len(row) > 12 else 'N/A'  # Ship State is in column M (index 12)
                 
                 # Get latest order data from Amazon
                 try:
@@ -631,19 +641,49 @@ class CustomAmazonSync:
                     latest_order_status = order.get('OrderStatus', 'N/A')
                     latest_ship_date = self.get_ship_date(order, order_items)
                     
-                    # ENHANCED: Check for status transitions and ship date changes
+                    # 🆕 ENHANCED: Get latest shipping address for Ship City and Ship State updates
+                    shipping_address = order.get('ShippingAddress', {})
+                    latest_ship_city = shipping_address.get('City', 'N/A')
+                    latest_ship_state = shipping_address.get('StateOrRegion', 'N/A')
+                    
+                    # ENHANCED: Check for status transitions and field changes
                     status_changed = current_order_status != latest_order_status
                     ship_date_changed = current_ship_date != latest_ship_date
+                    
+                    # 🆕 NEW: Check for Ship City and Ship State changes (especially when leaving Pending status)
+                    ship_city_changed = False
+                    ship_state_changed = False
+                    
+                    # Check if order is transitioning FROM Pending status to non-pending
+                    is_leaving_pending = (current_order_status.lower() == 'pending' and 
+                                        latest_order_status.lower() != 'pending')
+                    
+                    # Update Ship City and Ship State if:
+                    # 1. Status is leaving Pending, OR
+                    # 2. Current values are N/A and we have new data, OR  
+                    # 3. Values have actually changed
+                    if (is_leaving_pending or 
+                        (current_ship_city == 'N/A' and latest_ship_city != 'N/A') or
+                        (current_ship_city != latest_ship_city and latest_ship_city != 'N/A')):
+                        ship_city_changed = True
+                        
+                    if (is_leaving_pending or 
+                        (current_ship_state == 'N/A' and latest_ship_state != 'N/A') or
+                        (current_ship_state != latest_ship_state and latest_ship_state != 'N/A')):
+                        ship_state_changed = True
                     
                     # Log specific status transitions
                     if status_changed:
                         transition = f"{current_order_status} → {latest_order_status}"
                         if self.is_important_status_transition(current_order_status, latest_order_status):
                             print(f"🔄 Important status transition for {order_id}: {transition}")
+                            if is_leaving_pending:
+                                print(f"📍 Order leaving Pending status - will update shipping details")
                         else:
                             print(f"🔄 Status change for {order_id}: {transition}")
                     
-                    if status_changed or ship_date_changed:
+                    # Update any changed fields
+                    if status_changed or ship_date_changed or ship_city_changed or ship_state_changed:
                         print(f"🔄 Updating order {order_id} (from last 6 hours):")
                         
                         if status_changed:
@@ -656,6 +696,17 @@ class CustomAmazonSync:
                             # Update Ship Date (column J)
                             self.worksheet.update_cell(row_index, 10, latest_ship_date)
                         
+                        # 🆕 NEW: Update Ship City and Ship State
+                        if ship_city_changed:
+                            print(f"   🏙️ Ship City: {current_ship_city} → {latest_ship_city}")
+                            # Update Ship City (column L, index 11)
+                            self.worksheet.update_cell(row_index, 12, latest_ship_city)
+                            
+                        if ship_state_changed:
+                            print(f"   🏛️ Ship State: {current_ship_state} → {latest_ship_state}")
+                            # Update Ship State (column M, index 12)
+                            self.worksheet.update_cell(row_index, 13, latest_ship_state)
+                        
                         updated_count += 1
                         
                         # Small delay to avoid API rate limits
@@ -666,7 +717,7 @@ class CustomAmazonSync:
                     continue
             
             if updated_count > 0:
-                print(f"✅ Updated {updated_count} existing orders from last 6 hours with latest status and ship dates")
+                print(f"✅ Updated {updated_count} existing orders from last 6 hours with latest status, ship dates, and shipping details")
             else:
                 print("ℹ️ No existing orders from last 6 hours needed updates")
                 
