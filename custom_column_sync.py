@@ -298,11 +298,11 @@ class CustomAmazonSync:
             return date_string
     
     def get_next_serial_number(self):
-        """Get the next serial number starting from 193"""
+        """Get the next serial number based on current sheet data"""
         try:
             existing_data = self.worksheet.get_all_values()
             if len(existing_data) <= 1:
-                return 193  # Start from 193 if no data
+                return 193  # Start from 193 if no data exists
             
             # Get serial numbers from column A (index 0)
             serial_numbers = []
@@ -314,11 +314,11 @@ class CustomAmazonSync:
                         continue  # Skip non-numeric values
             
             if not serial_numbers:
-                return 193  # Start from 193 if no valid serial numbers
+                return 193  # Start from 193 if no valid serial numbers found
             
-            # Return the highest serial number + 1, but ensure minimum is 193
+            # Return the highest serial number + 1 (no minimum override)
             next_serial = max(serial_numbers) + 1
-            return max(next_serial, 193)
+            return next_serial
             
         except Exception as e:
             print(f"⚠️ Could not get serial number: {e}")
@@ -434,13 +434,17 @@ class CustomAmazonSync:
             return 'N/A'
     
     def sync_orders_to_sheet(self, orders):
-        """Add new orders to Google Sheet with STANDARDIZED 14-column layout and enhanced duplicate prevention"""
+        """Add new orders to Google Sheet with STANDARDIZED 14-column layout and enhanced duplicate prevention - FIXED SERIAL NUMBERS"""
         if not orders:
             print("ℹ️ No orders to sync")
             return
             
         # ENHANCED: Get both order IDs and order-item combinations to prevent duplicates
         existing_order_ids, existing_order_item_combinations = self.get_existing_unique_ids()
+        
+        # 🆕 SERIAL NUMBER FIX: Get starting serial number ONCE for entire batch
+        current_serial_number = self.get_next_serial_number()
+        print(f"🔢 Starting serial number for this batch: {current_serial_number}")
         
         new_orders_added = 0
         skipped_duplicates = 0
@@ -454,7 +458,7 @@ class CustomAmazonSync:
                 skipped_duplicates += 1
                 continue
                 
-            print(f"📋 Processing new order: {order_id}")
+            print(f"📋 Processing new order: {order_id} (Serial: {current_serial_number})")
             
             # Get order items
             order_items = self.get_order_details(order_id)
@@ -474,8 +478,8 @@ class CustomAmazonSync:
             # Get ship date
             ship_date = self.get_ship_date(order, order_items)
             
-            # Get next serial number for this order (same for all items in the order)
-            serial_number = self.get_next_serial_number()
+            # 🆕 FIXED: Use current batch serial number (same for all items in this order)
+            serial_number = current_serial_number
             
             # ENHANCED: Batch processing to prevent partial order insertion
             rows_to_insert = []
@@ -565,6 +569,9 @@ class CustomAmazonSync:
             
             # Mark this order as processed
             existing_order_ids.add(order_id)
+            
+            # 🆕 SERIAL NUMBER FIX: Increment serial number for next order
+            current_serial_number += 1
         
         print(f"🎉 New orders sync complete!")
         print(f"✅ Added {new_orders_added} new orders")
