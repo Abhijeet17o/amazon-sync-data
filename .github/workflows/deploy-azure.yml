@@ -60,15 +60,16 @@ jobs:
         app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
         package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
         publish-profile: ${{ secrets.AZURE_PUBLISH_PROFILE }}
-        scm-do-build-during-deployment: true
-        enable-oryx-build: true
+        scm-do-build-during-deployment: false
+        enable-oryx-build: false
 
     - name: 'Deployment Success'
       if: success()
       run: |
         echo "🎉 Deployment successful!"
         echo "🔗 Function App: ${{ env.AZURE_FUNCTIONAPP_NAME }}"
-        echo "⏰ Timer trigger will run every minute (sleep: 12:30-5:30 AM IST)"
+        echo "⏰ Timer trigger: Every 5 minutes (5:30 AM - 11:55 PM IST)"
+        echo "💰 Optimized for FREE TIER (no premium build charges)"
 
     - name: 'Deployment Failed'
       if: failure()
