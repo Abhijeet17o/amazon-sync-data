@@ -728,14 +728,14 @@ def is_sleep_time():
     return sleep_start <= now <= sleep_end
 
 def main(mytimer: func.TimerRequest) -> None:
-    """Azure Functions timer trigger main entry point"""
+    """Azure Functions timer trigger main entry point - OPTIMIZED FOR FREE TIER"""
     try:
         # Log timer information
-        logging.info(f'Timer trigger executed at: {datetime.now()}')
+        logging.info(f'⚡ Timer trigger executed at: {datetime.now()}')
         
-        # Check if we're in sleep time (12:30 AM to 5:30 AM IST)
+        # 🆕 COST OPTIMIZATION: Early exit for sleep time to save resources
         if is_sleep_time():
-            logging.info('😴 Sleeping time - No order checking until 5:30 AM')
+            logging.info('😴 Sleep time (12:30-5:30 AM) - Exiting immediately to save costs')
             return
         
         logging.info('🚀 Starting Amazon order sync...')
